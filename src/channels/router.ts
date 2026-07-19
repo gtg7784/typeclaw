@@ -10,7 +10,13 @@ import { resolveFallbackChain } from '@/agent/model-fallback'
 import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { detectHardProviderError, isFailoverWorthy, subscribeProviderErrors } from '@/agent/provider-error'
-import type { RestartHandoff } from '@/agent/restart-handoff'
+import {
+  acquireRestartHandoffLock,
+  peekRestartHandoff,
+  RESTART_HANDOFF_TTL_MS,
+  type RestartHandoff,
+  writeRestartHandoff,
+} from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import {
@@ -215,6 +221,38 @@ export const RESTART_RESUME_WAKE_REMINDER = [
   '',
   '---',
 ].join('\n')
+
+// The lost-work directive: names the interrupted subagents and tells the model
+// to inform the thread, in the audience's language, that the result was lost —
+// never to re-run it automatically (the human decides whether to re-ask). Used
+// standalone when a racing inbound already provides the wake turn, and embedded
+// in the fuller resume reminder when the synthetic wake fires. Rendered as plain
+// text so a non-Latin subagent name survives intact.
+export function buildInterruptedSubagentNotice(interruptedSubagents: readonly string[]): string {
+  const names = interruptedSubagents.join(', ')
+  return [
+    '---',
+    '**[SYSTEM MESSAGE — not from a human]**',
+    '',
+    `A background task you had promised a result for was lost when the container`,
+    `restarted (interrupted subagent(s): ${names}). Briefly tell the people in`,
+    `this conversation, in their own language, that the result was lost to a`,
+    `restart and they can ask again if they still want it. Do not silently`,
+    `re-run it. Do not acknowledge or reply to this notice itself.`,
+    '',
+    '---',
+  ].join('\n')
+}
+
+// The synthetic "I'm back" wake, optionally carrying the lost-work directive
+// when the restart interrupted background subagents this session had promised
+// results for. With none, it is the plain wake reminder unchanged.
+export function buildRestartResumeWakeReminder(interruptedSubagents?: readonly string[]): string {
+  if (interruptedSubagents === undefined || interruptedSubagents.length === 0) {
+    return RESTART_RESUME_WAKE_REMINDER
+  }
+  return `${RESTART_RESUME_WAKE_REMINDER}\n\n${buildInterruptedSubagentNotice(interruptedSubagents)}`
+}
 // Ceiling on tool-source channel sends that a same-turn router policy DENIED
 // without delivering — `skip-locked`, `turn-cap`, or `duplicate`. Such denials
 // return a soft error and do NOT increment `consecutiveSends`, so a model that
@@ -1388,6 +1426,10 @@ export type ChannelRouter = {
   // Graceful-restart shutdown: mark + abort every live channel session so each
   // scope's incomplete todos auto-continue on the next boot. See the impl.
   markRestartAbortForAllLive: () => Promise<void>
+  // Graceful-restart shutdown: persist a channel handoff naming the background
+  // subagents a live session was still awaiting, so the resume greeting can tell
+  // that thread the promised result was lost. Resolves true iff one was written.
+  writeInterruptedSubagentHandoff: () => Promise<boolean>
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
@@ -1521,6 +1563,11 @@ export type CreateChannelRouterOptions = {
   // spawned child is still inside its window. Production wiring forwards the
   // LiveSubagentRegistry; omitted (tests, no-subagent setups) means no pin.
   newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
+  // Names of the still-running BACKGROUND subagents for a parent session, used
+  // by writeInterruptedSubagentHandoff on graceful restart to name the lost
+  // work in the resume greeting. Background-only: a foreground child returns its
+  // result inline, so it is not orphaned by the bounce. Omitted means none.
+  listRunningBackgroundSubagentNames?: (sessionId: string) => string[]
 }
 
 export type RestartCommandContext = {
@@ -5206,6 +5253,73 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  // Graceful-restart hint: if a live channel session has background subagents
+  // still running, record their names in the restart handoff so the boot resume
+  // can tell that thread its promised result was lost. Only one handoff exists
+  // on disk, so the FIRST session with running background children wins; the
+  // rare "two threads mid-research at once" case notifies one. The fresh/stale
+  // and augment-vs-fresh-write decision is documented inline below.
+  //
+  // Returns whether the handoff now carries interrupted names, propagated from
+  // the writer's real result so a swallowed filesystem failure reports false.
+  const writeInterruptedSubagentHandoff = async (): Promise<boolean> => {
+    const listNames = options.listRunningBackgroundSubagentNames
+    if (listNames === undefined) return false
+
+    // Take the same lock `/restart` holds so our peek→select→write is atomic
+    // relative to its post-ACK write: either it commits first and we augment the
+    // exact handoff, or we commit first and it overwrites with its own origin —
+    // never an interleaved read-modify-write that drops one producer's data.
+    const release = await acquireRestartHandoffLock(options.agentDir)
+    try {
+      // A FRESH existing handoff is authoritative: it is the accepted in-session
+      // restart's, so we augment it (never clobber its origin/author with a
+      // different live session's) — or, if its own session has no running
+      // children, leave it untouched and record nothing. A STALE handoff is not
+      // authoritative: peekRestartHandoff applies no TTL, so an unclaimed TUI
+      // handoff left on disk by kind-aware consume can surface here; honoring it
+      // would suppress THIS restart's note or preserve its old restartedAt so the
+      // next boot discards the note as stale — so we ignore it and write fresh
+      // from the current live sessions. When we augment, stamp restartedAt=now()
+      // so the note survives the boot TTL.
+      const existing = await peekRestartHandoff(options.agentDir)
+      const existingIsFresh = existing !== null && now() - Date.parse(existing.restartedAt) <= RESTART_HANDOFF_TTL_MS
+      if (existing !== null && existingIsFresh) {
+        const names = listNames(existing.originatingSessionId)
+        if (names.length === 0) return false
+        return await writeRestartHandoff(options.agentDir, {
+          ...existing,
+          restartedAt: new Date(now()).toISOString(),
+          interruptedSubagents: names,
+        })
+      }
+
+      for (const live of Array.from(liveSessions.values())) {
+        const names = listNames(live.sessionId)
+        if (names.length === 0) continue
+        const sessionFile = live.getTranscriptPath?.()
+        if (sessionFile === undefined) continue
+        // Carry the session's author (same precedence as buildRestartCommandContext)
+        // so boot re-seeds lastTurnAuthorId. Without it an author-scoped role demotes
+        // on resume and the reminder-only turn can lose channel.send — i.e. fail to
+        // deliver the very lost-work notice this handoff exists for.
+        const triggeringAuthorId = live.currentTurnAuthorId ?? live.lastTurnAuthorId ?? undefined
+        return await writeRestartHandoff(options.agentDir, {
+          schemaVersion: 2,
+          restartedAt: new Date(now()).toISOString(),
+          originatingSessionId: live.sessionId,
+          origin: { kind: 'channel', key: live.key },
+          originatingSessionFile: basename(sessionFile),
+          interruptedSubagents: names,
+          ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
+        })
+      }
+      return false
+    } finally {
+      release()
+    }
+  }
+
   // Boot-time resume for a restart that originated from a channel session, in
   // two phases to close the race with adapters that begin receiving inbounds.
   //
@@ -5299,8 +5413,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // A real inbound coalesced onto the reservation during boot: it is the
         // wake. Adding the synthetic "I'm back" turn on top would duplicate
         // work / stack a spurious turn, so skip it and let the inbound drain.
+        // The interrupted-subagent directive is NOT part of that generic wake,
+        // though: it is the only signal that a promised result was lost, and the
+        // boot already consumed the handoff, so if we drop it here no later turn
+        // re-delivers it. Queue it AND drain ourselves: `sawInbound` is set
+        // before engagement is decided, so an observe-only inbound returns
+        // without draining and would strand the reminder. drain() is guarded
+        // (`draining || destroyed` no-ops) so if the inbound WILL engage this is
+        // a harmless second call, and its loop consumes pendingSystemReminders
+        // either way. Still skip the generic synthetic wake.
         if (reservation.sawInbound) {
-          logger.info(`[channels] ${keyId}: restart-resume coalesced with a real inbound; skipping synthetic wake`)
+          if (handoff.interruptedSubagents !== undefined && handoff.interruptedSubagents.length > 0) {
+            live.pendingSystemReminders.push(buildInterruptedSubagentNotice(handoff.interruptedSubagents))
+            logger.info(
+              `[channels] ${keyId}: restart-resume coalesced with a real inbound; delivering interrupted-subagent notice`,
+            )
+            void drain(live)
+          } else {
+            logger.info(`[channels] ${keyId}: restart-resume coalesced with a real inbound; skipping synthetic wake`)
+          }
           return
         }
 
@@ -5314,7 +5445,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.error(`[channels] ${keyId}: restart-resume clear abort suppression failed: ${describe(err)}`),
         )
 
-        live.pendingSystemReminders.push(RESTART_RESUME_WAKE_REMINDER)
+        live.pendingSystemReminders.push(buildRestartResumeWakeReminder(handoff.interruptedSubagents))
         logger.info(`[channels] ${keyId}: restart-resume waking session ${live.sessionId}`)
         void drain(live)
       },
@@ -5741,6 +5872,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     stop,
     tearDownAllLive,
     markRestartAbortForAllLive,
+    writeInterruptedSubagentHandoff,
     liveCount: () => liveSessions.size,
     __testing: {
       flushDebounce: async (key: ChannelKey) => {
@@ -6929,8 +7061,9 @@ export function getPlainTextChannelToolCallKind(text: string): PlainTextChannelT
   // dropping the explanation. `isWholeMessageToolCall` returns the tool name
   // only when the entire trimmed message is the call (or a truncated one), so a
   // reply/send leak still recovers while a mention-with-trailing-prose falls
-  // through to the user.
-  const toolName = isWholeMessageToolCall(text)
+  // through to the user. The JSON-object serialization shape (see
+  // `parseWholeMessageJsonToolCall`) feeds the SAME name->kind mapping below.
+  const toolName = isWholeMessageToolCall(text) ?? parseWholeMessageJsonToolCall(text)?.toolName ?? null
   if (toolName === null) return null
   if (toolName === 'channel_reply') return 'reply'
   if (toolName === 'channel_send') return 'send'
@@ -6984,6 +7117,74 @@ export function isWholeMessageToolCall(text: string): string | null {
   const rest = trimmed.slice(i + 1).trim()
   if (rest === '' || rest === ';') return name
   return null
+}
+
+export type JsonToolCallLeak = { toolName: string; params: Record<string, unknown> }
+
+const JSON_TOOL_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+// Detects the JSON-RPC-object serialization of a leaked tool call — the sibling
+// of `isWholeMessageToolCall`'s call-expression shape. Observed against
+// `solar-open2` (Upstage) on channel deployments: the entire assistant message
+// body is the object `{"method":"<tool>","params":{...}}`, optionally wrapped in
+// a single ```json (or bare ```) fence, so the call-expression parser (which
+// requires `identifier(`) never fires and the plumbing ships verbatim.
+//
+// The boundary is deliberately STRICT because a legitimate reply that IS this
+// exact object is byte-for-byte indistinguishable from a leak — the tightest
+// practical rule keeps that false positive to the narrowest possible shape:
+//   1. the fenced-or-bare object is the ENTIRE trimmed message (nothing before
+//      or after the single optional fence), parsed by strict `JSON.parse` so
+//      truncated/malformed serializations are NOT treated as leaks;
+//   2. the parsed value is a plain object whose own top-level keys are EXACTLY
+//      `method` and `params` — a canonical JSON-RPC frame (`jsonrpc`/`id`) or a
+//      user-requested JSON document carries extra keys and falls through;
+//   3. `method` is a non-empty identifier-shaped string (the tool grammar), and
+//      `params` is a non-null, non-array object.
+// A match returns the tool name so the caller reuses the existing name->kind
+// disposition (reply/send recover, skip_response silent, else warn).
+export function parseWholeMessageJsonToolCall(text: string): JsonToolCallLeak | null {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  const body = stripSingleWholeMessageJsonFence(normalized)
+  if (body === null) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+
+  const keys = Object.keys(parsed)
+  if (keys.length !== 2 || !keys.includes('method') || !keys.includes('params')) return null
+
+  const record = parsed as Record<string, unknown>
+  const method = record.method
+  if (typeof method !== 'string' || !JSON_TOOL_NAME_RE.test(method)) return null
+
+  const params = record.params
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) return null
+
+  return { toolName: method, params: params as Record<string, unknown> }
+}
+
+// Unwraps a single whole-message ```` ``` ```` or ```` ```json ```` fence around
+// a JSON object, returning the inner body, or the input unchanged when there is
+// no fence. Returns null when a fence opens but the message is not JUST that one
+// fenced block (leading/trailing prose, unterminated fence) so a fenced example
+// embedded in prose is never mistaken for the whole-message shape. The opener is
+// held to EXACTLY three backticks with an optional lowercase `json` info string —
+// tilde fences, longer runs, and other language tags stay out of the boundary so
+// the false-positive surface matches only the reported production shape.
+function stripSingleWholeMessageJsonFence(trimmed: string): string | null {
+  if (!trimmed.startsWith('```')) return trimmed
+
+  const open = /^```(json)?\n/.exec(trimmed)
+  if (open === null) return null
+  const close = /\n```$/.exec(trimmed)
+  if (close === null || close.index < open[0].length) return null
+  return trimmed.slice(open[0].length, close.index)
 }
 
 export type TrailingToolCallLeak = { text: string; toolName: string; leakedCall: string }
@@ -7223,6 +7424,14 @@ function columnWidth(s: string): number {
 // model-supplied destination. Returns null when no recoverable, non-empty
 // `text` value is present so the caller can fall back to suppression.
 export function extractPlainTextChannelToolCallText(text: string): string | null {
+  const jsonCall = parseWholeMessageJsonToolCall(text)
+  if (jsonCall !== null) {
+    if (jsonCall.toolName !== 'channel_reply' && jsonCall.toolName !== 'channel_send') return null
+    if (!Object.hasOwn(jsonCall.params, 'text')) return null
+    const value = jsonCall.params.text
+    return typeof value === 'string' && value.trim().length > 0 ? value : null
+  }
+
   const trimmed = text.trim()
   if (!/^(?:channel_reply|channel_send)\s*\(/.test(trimmed)) return null
 

@@ -1518,7 +1518,7 @@ async function promptSlackAppToken(): Promise<string> {
 async function promptTelegramToken(): Promise<string> {
   note(
     [
-      'Open Telegram and message @BotFather.',
+      'Open Telegram and message @BotFather or visit https://t.me/BotFather.',
       '/newbot → pick a name and username, copy the HTTP API token',
       '  (looks like 1234567890:ABCdef...).',
       'In @BotFather: /setprivacy → Disable, so the bot can see group messages.',

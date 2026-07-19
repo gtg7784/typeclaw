@@ -130,6 +130,24 @@ function fakeClient(options: FakeClientOptions = {}): FakeClient {
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 30))
 
+// pi-tui defers renders through process.nextTick → a throttled setTimeout, so a
+// fixed flush() races the pipeline on slow CI (Windows). Poll until the text
+// appears; reject on timeout so a genuinely-missing render still fails.
+const waitForVisible = (terminal: FakeTerminal, substring: string, timeoutMs = 2_000) =>
+  new Promise<void>((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs
+    const check = () => {
+      if (terminal.visible().includes(substring)) return resolve()
+      if (Date.now() > deadline) {
+        return reject(
+          new Error(`timed out after ${timeoutMs}ms waiting for ${JSON.stringify(substring)} in terminal output`),
+        )
+      }
+      setTimeout(check, 1)
+    }
+    check()
+  })
+
 describe('createTui', () => {
   test('exits when the server closes before sending connected', async () => {
     // given
@@ -763,7 +781,7 @@ describe('createTui', () => {
     client.emit({ type: 'tool_end', toolCallId: 't', name: 'Read', error: false, result: 'r', durationMs: 1 })
     await flush()
     client.emit({ type: 'done' })
-    await flush()
+    await waitForVisible(terminal, '✓ Read')
 
     // then: every history marker appears BEFORE the editor's bottom border in
     // the rendered output. The editor draws horizontal box-drawing borders
@@ -846,7 +864,7 @@ describe('createTui queue panel', () => {
         { id: 'q2', text: 'then run the tests', ts: 2 },
       ],
     })
-    await flush()
+    await waitForVisible(terminal, '[QUEUED] then run the tests')
 
     // then
     const visible = terminal.visible()
@@ -882,7 +900,7 @@ describe('createTui queue panel', () => {
     // when: a fresh queue_state replaces both items
     terminal.written.length = 0
     client.emit({ type: 'queue_state', pending: [{ id: 'q3', text: 'new-c', ts: 3 }] })
-    await flush()
+    await waitForVisible(terminal, '[QUEUED] new-c')
 
     // then: the latest render shows the new item; nothing about the dropped ids
     const visible = terminal.visible()
@@ -908,7 +926,7 @@ describe('createTui queue panel', () => {
     const runPromise = tui.run()
     await flush()
     client.emit({ type: 'queue_state', pending: [{ id: 'q1', text: 'pending one', ts: 1 }] })
-    await flush()
+    await waitForVisible(terminal, '[QUEUED] pending one')
     expect(terminal.visible()).toContain('[QUEUED] pending one')
 
     // when
@@ -940,7 +958,7 @@ describe('createTui queue panel', () => {
 
     // when
     client.emit({ type: 'queue_state', pending: [{ id: 'q1', text: 'queued thing', ts: 1 }] })
-    await flush()
+    await waitForVisible(terminal, '[QUEUED] queued thing')
 
     // then: layout invariant is [...history, queuePanel, editor]
     const visible = terminal.visible()
@@ -985,7 +1003,7 @@ describe('createTui queue panel', () => {
     terminal.feed('\r')
     await flush()
     client.emit({ type: 'queue_state', pending: [{ id: 'm-b', text: 'B', ts: 1 }] })
-    await flush()
+    await waitForVisible(terminal, '[QUEUED] B')
 
     // then: B is shown in the QUEUED panel but NOT yet in the chat history
     let visible = terminal.visible()
@@ -1003,7 +1021,7 @@ describe('createTui queue panel', () => {
     client.emit({ type: 'prompt_started', messageId: 'm-b', text: 'B' })
     await flush()
     client.emit({ type: 'text_delta', delta: 'response to B' })
-    await flush()
+    await waitForVisible(terminal, 'response to B')
     client.emit({ type: 'done' })
     await flush()
 
@@ -1046,7 +1064,7 @@ describe('createTui queue panel', () => {
     // rather than the cumulative log of past frames.
     terminal.written.length = 0
     client.emit({ type: 'tool_start', toolCallId: 't', name: 'Read', args: {} })
-    await flush()
+    await waitForVisible(terminal, '● Read')
 
     // then: layout invariant is [...history, queuePanel, editor]
     const visible = terminal.visible()

@@ -76,6 +76,14 @@ export function createMemorySearchTool() {
       chat: z.string().optional(),
       thread: z.string().optional(),
     }),
+    // Every string field is a search term, an exact topic/reference slug, an ISO
+    // date, or an origin id/name — none is a local path (the tool reads memory/
+    // internally, never a caller path). Declared so a `topic` slug that collides
+    // with an agent-root dir, or a `since` date like "2026-01-01", is not
+    // misread as a file operand.
+    fileOperands: {
+      nonFile: ['query', 'topic', 'since', 'before', 'where', 'workspace', 'chat', 'thread'],
+    },
     async execute({ query, topic, asRegex, full, maxResults, since, before, where, workspace, chat, thread }, ctx) {
       if ((query === undefined) === (topic === undefined)) {
         return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })

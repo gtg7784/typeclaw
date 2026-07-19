@@ -3,24 +3,66 @@ import { describe, expect, test } from 'bun:test'
 import { createStream } from '@/stream'
 
 import { LiveSubagentRegistry } from './live-subagents'
-import { beginSubagentDrainWatch, runSubagentDrain, type SubagentBackgroundDrain } from './subagent-drain'
+import {
+  beginSubagentDrainWatch,
+  runSubagentDrain,
+  type SubagentBackgroundDrain,
+  type TimerScheduler,
+} from './subagent-drain'
 
 const PARENT = 'ses_subagent'
+
+// A controllable timer scheduler: records set/clear so tests can assert
+// cancellation deterministically, and lets a test fire the pending timer by hand.
+function makeFakeScheduler(): TimerScheduler & {
+  setCount: () => number
+  clearCount: () => number
+  fire: () => void
+  hasPending: () => boolean
+} {
+  let pending: (() => void) | null = null
+  let handle = 0
+  let sets = 0
+  let clears = 0
+  return {
+    set: (fn) => {
+      sets++
+      pending = fn
+      return ++handle
+    },
+    clear: () => {
+      clears++
+      pending = null
+    },
+    setCount: () => sets,
+    clearCount: () => clears,
+    hasPending: () => pending !== null,
+    fire: () => {
+      const fn = pending
+      pending = null
+      fn?.()
+    },
+  }
+}
 
 function noopAbort(): Promise<void> {
   return Promise.resolve()
 }
 
-function registerChild(reg: LiveSubagentRegistry, taskId: string): void {
+function registerChild(
+  reg: LiveSubagentRegistry,
+  taskId: string,
+  opts?: { startedAt?: number; abort?: () => Promise<void> },
+): void {
   reg.register({
     taskId,
     sessionId: `ses_${taskId}`,
     subagentName: 'scout',
     parentSessionId: PARENT,
     background: true,
-    startedAt: 0,
+    startedAt: opts?.startedAt ?? 0,
     status: 'running',
-    abort: noopAbort,
+    abort: opts?.abort ?? noopAbort,
   })
 }
 
@@ -260,5 +302,278 @@ describe('runSubagentDrain — termination', () => {
     expect(prompts.length).toBe(1)
     expect(prompts[0]).toContain('FAILED')
     expect(prompts[0]).toContain('boom')
+  })
+})
+
+describe('runSubagentDrain — maxChildWaitMs (wedged-child ceiling)', () => {
+  test('expires a child that stays running past the ceiling, then terminates', async () => {
+    // given: a child that started at t=0 and never completes
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_wedged', { startedAt: 0 })
+
+    // when: the clock is already past the 5000ms ceiling
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 5000,
+      now: () => 6000,
+    })
+
+    // then: the wedged child is abandoned (FAILED reminder) and the loop returns
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('bg_wedged')
+    expect(prompts[0]).toContain('FAILED')
+    expect(reg.get('bg_wedged')?.status).toBe('failed')
+  })
+
+  test('aborts the wedged child when expiring it', async () => {
+    // given: a child whose abort we can observe
+    const { drain, reg } = makeDrain()
+    let aborted = false
+    registerChild(reg, 'bg_wedged', { startedAt: 0, abort: async () => void (aborted = true) })
+
+    // when
+    const watch = beginSubagentDrainWatch(drain)
+    await runSubagentDrain(watch, {
+      drain,
+      prompt: async () => {},
+      maxChildWaitMs: 5000,
+      now: () => 6000,
+    })
+
+    // then
+    expect(aborted).toBe(true)
+  })
+
+  test('does NOT expire a child still within the ceiling (parks on wakeup)', async () => {
+    // given: a child started at t=0, clock at 3000ms, ceiling 5000ms
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_young', { startedAt: 0 })
+
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    const done = runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 5000,
+      now: () => 3000,
+    })
+
+    // then: still running, not expired — no reminder yet
+    await new Promise((r) => setTimeout(r, 5))
+    expect(prompts).toEqual([])
+    expect(reg.get('bg_young')?.status).toBe('running')
+
+    // when: the child completes normally and wakes the loop
+    reg.recordCompletion('bg_young', { ok: true, durationMs: 3000 })
+    drain.stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'subagent.completed',
+        taskId: 'bg_young',
+        subagent: 'scout',
+        parentSessionId: PARENT,
+        ok: true,
+        durationMs: 3000,
+      },
+    })
+
+    await done
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('bg_young')
+    expect(prompts[0]).not.toContain('FAILED')
+  })
+
+  test('expires only the overdue child, leaving a healthy sibling to complete', async () => {
+    // given: one child wedged since t=0 and one that will complete normally
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_wedged', { startedAt: 0 })
+    registerChild(reg, 'bg_ok', { startedAt: 5000 })
+    reg.recordCompletion('bg_ok', { ok: true, durationMs: 100 })
+
+    // when: clock past the ceiling for bg_wedged but not bg_ok
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 5000,
+      now: () => 6000,
+    })
+
+    // then: both are delivered — ok as success, wedged as FAILED — and loop ends
+    expect(prompts.length).toBe(2)
+    expect(prompts.some((p) => p.includes('bg_ok') && !p.includes('FAILED'))).toBe(true)
+    expect(prompts.some((p) => p.includes('bg_wedged') && p.includes('FAILED'))).toBe(true)
+  })
+
+  test("still terminates when the wedged child's abort() never settles", async () => {
+    // given: a child whose abort hangs forever — awaiting it would wedge the drain
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_wedged', { startedAt: 0, abort: () => new Promise<void>(() => {}) })
+
+    // when: clock past the ceiling
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 5000,
+      now: () => 6000,
+    })
+
+    // then: the timeout was recorded and reminder delivered despite the hung abort
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('bg_wedged')
+    expect(prompts[0]).toContain('FAILED')
+    expect(reg.get('bg_wedged')?.status).toBe('failed')
+  })
+
+  test('a real completion racing the timeout does not double-settle (first writer wins)', async () => {
+    // given: the timeout path settles the child first (clock past the ceiling)
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_race', { startedAt: 0 })
+
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 5000,
+      now: () => 6000,
+    })
+
+    // when: the child's real (success) completion arrives afterwards
+    const late = reg.recordCompletionIfRunning('bg_race', { ok: true, durationMs: 6000, finalMessage: 'late' })
+
+    // then: it loses; the timeout outcome the model already saw stays canonical
+    expect(late).toBe(false)
+    expect(reg.get('bg_race')?.status).toBe('failed')
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('FAILED')
+  })
+
+  test('a timer expiry (no broadcast) wakes the loop and expires the child at the boundary', async () => {
+    // given: a fake scheduler so the expiry timer fires on demand — deterministic,
+    // no real clock. The child is within the ceiling at loop entry (clock=30 <
+    // deadline=50), so the loop parks on the expiry TIMER, not on a broadcast.
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_timer', { startedAt: 0 })
+    let clock = 30
+    const sched = makeFakeScheduler()
+
+    const watch = beginSubagentDrainWatch(drain, sched)
+    const prompts: string[] = []
+    const done = runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 50,
+      now: () => clock,
+    })
+
+    // the loop is parked on the expiry timer, no broadcast, no reminder yet
+    await Promise.resolve()
+    expect(sched.setCount()).toBeGreaterThan(0)
+    expect(prompts).toEqual([])
+
+    // when: the deadline passes and the timer fires (returns true); re-derive expires it
+    clock = 100
+    sched.fire()
+
+    // then: the timer-driven path (not a broadcast) drove expiry
+    await done
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('bg_timer')
+    expect(prompts[0]).toContain('FAILED')
+  })
+
+  test('a completion-broadcast wake CLEARS the pending expiry timer', async () => {
+    // given: a child within the ceiling, so the loop parks on the expiry timer
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_wake', { startedAt: 0 })
+    const sched = makeFakeScheduler()
+
+    const watch = beginSubagentDrainWatch(drain, sched)
+    const prompts: string[] = []
+    const done = runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 50,
+      now: () => 30,
+    })
+    await Promise.resolve()
+    expect(sched.setCount()).toBe(1)
+    expect(sched.hasPending()).toBe(true)
+
+    // when: the child completes and a broadcast wake arrives before the timer
+    reg.recordCompletion('bg_wake', { ok: true, durationMs: 30 })
+    drain.stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'subagent.completed',
+        taskId: 'bg_wake',
+        subagent: 'scout',
+        parentSessionId: PARENT,
+        ok: true,
+        durationMs: 30,
+      },
+    })
+    await done
+
+    // then: the wake cleared the pending timer (no leaked timer, no double-wake)
+    expect(sched.clearCount()).toBe(1)
+    expect(sched.hasPending()).toBe(false)
+  })
+})
+
+describe('runSubagentDrain — stop() with a running child', () => {
+  test('a stopped watch terminates instead of spinning forever on a still-running child', async () => {
+    // given: a background child that never completes
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_stuck', { startedAt: 0 })
+
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    const done = runSubagentDrain(watch, { drain, prompt: async (t) => void prompts.push(t) })
+
+    // the loop parks on waitForWakeup (no ceiling, child still running)
+    await new Promise((r) => setTimeout(r, 5))
+    expect(prompts).toEqual([])
+
+    // when: the watch is stopped (waitForWakeup resolves false)
+    watch.stop()
+
+    // then: the loop returns rather than busy-looping on the running child
+    await done
+    expect(prompts).toEqual([])
+  })
+
+  test('stop() CLEARS a pending expiry timer', async () => {
+    // given: a child within the ceiling, so the loop parks on the expiry timer
+    const { drain, reg } = makeDrain()
+    registerChild(reg, 'bg_stuck', { startedAt: 0 })
+    const sched = makeFakeScheduler()
+
+    const watch = beginSubagentDrainWatch(drain, sched)
+    const prompts: string[] = []
+    const done = runSubagentDrain(watch, {
+      drain,
+      prompt: async (t) => void prompts.push(t),
+      maxChildWaitMs: 50,
+      now: () => 30,
+    })
+    await Promise.resolve()
+    expect(sched.hasPending()).toBe(true)
+
+    // when: the watch is stopped while the expiry timer is still pending
+    watch.stop()
+    await done
+
+    // then: stop() cancelled the pending timer (it never fires after teardown)
+    expect(sched.clearCount()).toBe(1)
+    expect(sched.hasPending()).toBe(false)
+    expect(prompts).toEqual([])
   })
 })

@@ -212,6 +212,36 @@ describe('LiveSubagentRegistry', () => {
     reg.recordCompletion('bg_a', { ok: true, durationMs: 1 })
     expect(reg.hasLiveForSession('ses_x')).toBe(false)
   })
+
+  test('recordCompletionIfRunning: the first writer wins and returns true', () => {
+    const reg = new LiveSubagentRegistry()
+    reg.register(makeLive())
+    expect(reg.recordCompletionIfRunning('bg_t1', { ok: false, error: 'timeout', durationMs: 100 })).toBe(true)
+    expect(reg.get('bg_t1')?.status).toBe('failed')
+    expect(reg.get('bg_t1')?.completion?.error).toBe('timeout')
+  })
+
+  test('recordCompletionIfRunning: a second writer loses, returns false, and does NOT overwrite', () => {
+    const reg = new LiveSubagentRegistry()
+    reg.register(makeLive())
+
+    // given: the timeout path settled first
+    reg.recordCompletionIfRunning('bg_t1', { ok: false, error: 'timeout', durationMs: 100 })
+
+    // when: the real completion arrives afterwards
+    const won = reg.recordCompletionIfRunning('bg_t1', { ok: true, finalMessage: 'late success', durationMs: 200 })
+
+    // then: it loses and the first (timeout) outcome stays canonical
+    expect(won).toBe(false)
+    expect(reg.get('bg_t1')?.status).toBe('failed')
+    expect(reg.get('bg_t1')?.completion?.error).toBe('timeout')
+    expect(reg.get('bg_t1')?.completion?.finalMessage).toBeUndefined()
+  })
+
+  test('recordCompletionIfRunning: returns false for an unknown taskId', () => {
+    const reg = new LiveSubagentRegistry()
+    expect(reg.recordCompletionIfRunning('nope', { ok: true, durationMs: 1 })).toBe(false)
+  })
 })
 
 describe('snapshot.statusSummary rendering', () => {

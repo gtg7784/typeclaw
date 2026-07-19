@@ -6,12 +6,15 @@ import { join } from 'node:path'
 import { isWindows } from '@/shared'
 import { waitFor } from '@/test-helpers/wait-for'
 
+import { CurlImpersonateError } from './curl-impersonate'
 import {
   _setCurlBinaryForTest,
   _setSearchRetryForTest,
   DDG_CONCURRENCY,
+  DdgCaptchaError,
   ddgSearch,
   fetchDdgHtml,
+  isTransientSearchError,
   parseDdgHtml,
 } from './ddg'
 
@@ -298,6 +301,52 @@ describe.skipIf(onWindows)('ddgSearch (retry + concurrency)', () => {
     expect(results[0]?.url).toBe('https://ok.example/')
   })
 
+  test('retries past a transient connection timeout (curl exit 28) and returns results', async () => {
+    // given: first spawn exits 28 (curl connection timeout), the next serves a SERP
+    const counter = join(scratchDir, 'count')
+    installFakeBinary(`
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then j=$((i + 1)); eval "WTPL=\\"\\\${$j}\\""; break; fi
+  i=$((i + 1))
+done
+N=$(cat ${counter} 2>/dev/null || echo 0)
+echo $((N + 1)) > ${counter}
+if [ "$N" -lt 1 ]; then echo "curl: (28) Connection timed out after 30000 milliseconds" >&2; exit 28; fi
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
+printf '%s' '${RESULT_SERP}'
+printf '%s' "$RENDERED"
+`)
+
+    // when
+    const results = await ddgSearch('q', 10)
+
+    // then
+    expect(results).toHaveLength(1)
+    expect(results[0]?.url).toBe('https://ok.example/')
+  })
+
+  test('gives up after the bounded attempts when the timeout never clears', async () => {
+    // given: every spawn exits 28, so no attempt ever succeeds
+    installFakeBinary('echo "curl: (28) Connection timed out after 30000 milliseconds" >&2; exit 28')
+
+    // when / then: the error propagates (bounded, not an infinite loop) as a curl timeout
+    await expect(ddgSearch('q', 10)).rejects.toThrow(/exited 28/)
+  })
+
+  test('does NOT retry a hard network failure (non-timeout exit code)', async () => {
+    // given: a fake binary that fails with a non-timeout code on every call
+    const counter = join(scratchDir, 'count-hard')
+    installFakeBinary(
+      `N=$(cat ${counter} 2>/dev/null || echo 0); echo $((N + 1)) > ${counter}; echo "boom" >&2; exit 7`,
+    )
+
+    // when / then: surfaces immediately without burning the retry budget
+    await expect(ddgSearch('q', 10)).rejects.toThrow(/exited 7/)
+    expect(await Bun.file(join(scratchDir, 'count-hard')).text()).toBe('1\n')
+  })
+
   test('caps concurrent ddgSearch calls at DDG_CONCURRENCY across the process', async () => {
     // given: each spawn marks itself with a per-pid file and holds the slot
     // until released. Per-spawn marker files make the live count race-free —
@@ -400,5 +449,25 @@ printf '%s' "$RENDERED"
     // cleanup: release the held slots so the saturating calls finish
     writeFileSync(releaseFile, 'go', 'utf8')
     await Promise.all(saturating)
+  })
+})
+
+describe('isTransientSearchError', () => {
+  test('a CAPTCHA is transient', () => {
+    expect(isTransientSearchError(new DdgCaptchaError())).toBe(true)
+  })
+
+  test('a curl connection timeout (exit 28) is transient', () => {
+    const err = new CurlImpersonateError('curl-impersonate exited 28: timed out', 28, 'timed out')
+    expect(isTransientSearchError(err)).toBe(true)
+  })
+
+  test('a hard curl failure (non-timeout exit) is NOT transient', () => {
+    const err = new CurlImpersonateError('curl-impersonate exited 7: refused', 7, 'refused')
+    expect(isTransientSearchError(err)).toBe(false)
+  })
+
+  test('an arbitrary error is NOT transient', () => {
+    expect(isTransientSearchError(new Error('parse failed'))).toBe(false)
   })
 })

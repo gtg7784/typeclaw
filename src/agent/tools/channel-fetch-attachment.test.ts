@@ -92,6 +92,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     stop: async () => {},
     tearDownAllLive: async () => {},
     markRestartAbortForAllLive: async () => {},
+    writeInterruptedSubagentHandoff: async () => false,
     liveCount: () => 0,
   }
 }

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { restartHandoffPath } from '@/agent/restart-handoff'
+import { acquireRestartHandoffLock, restartHandoffPath } from '@/agent/restart-handoff'
 import { createStream, type StreamMessage } from '@/stream'
 
 import { requestContainerRestart } from './index'
@@ -140,6 +140,62 @@ describe('requestContainerRestart', () => {
       originatingSessionFile: 'ses-origin.jsonl',
       origin: { kind: 'tui' },
     })
+  })
+
+  test('holds the handoff lock across the ACK so a concurrent handoff producer waits for the commit', async () => {
+    // given: a hostd whose ACK is withheld until we release it — the window where
+    //   SIGTERM (docker stop) can fire before requestContainerRestart's write lands
+    let releaseAck!: () => void
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve
+    })
+    server = Bun.serve({
+      port: 0,
+      async fetch() {
+        await ackGate
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+
+    const restartDone = requestContainerRestart({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      agentDir,
+      originatingSessionId: 'ses-origin',
+      originatingSessionFile: '/tmp/sessions/ses-origin.jsonl',
+      handoffOrigin: { kind: 'channel', key: { adapter: 'discord-bot', workspace: 'g', chat: 'c', thread: null } },
+      triggeringAuthorId: 'U_OWNER',
+      restartedAt: '2026-01-02T03:04:05.000Z',
+    })
+
+    // when: a second producer tries to take the handoff lock while the ACK is withheld
+    let secondAcquired = false
+    const second = acquireRestartHandoffLock(agentDir).then((r) => {
+      secondAcquired = true
+      return r
+    })
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then: it is blocked — requestContainerRestart holds the lock from before the ACK
+    expect(secondAcquired).toBe(false)
+    expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
+
+    // when: the ACK lands, requestContainerRestart writes and releases the lock
+    releaseAck()
+    await restartDone
+    const release2 = await second
+
+    // then: the second producer only proceeds AFTER the committed handoff exists,
+    //   and that handoff carries requestContainerRestart's origin + author
+    expect(secondAcquired).toBe(true)
+    expect(JSON.parse(await readFile(restartHandoffPath(agentDir), 'utf8'))).toMatchObject({
+      originatingSessionId: 'ses-origin',
+      triggeringAuthorId: 'U_OWNER',
+      origin: { kind: 'channel' },
+    })
+    release2()
   })
 
   test('writes triggeringAuthorId into the handoff so the resumed session re-seeds the requester', async () => {

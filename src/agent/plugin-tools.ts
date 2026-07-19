@@ -25,6 +25,7 @@ import {
 } from '@/bundled-plugins/guard/policy'
 import { config, getSandboxWritablePathSpecs } from '@/config/config'
 import { assertNoCanonicalSecretsInGit } from '@/git/secret-history'
+import { readEnvFile } from '@/init/env-file'
 import type { PermissionService } from '@/permissions/permissions'
 import type {
   BuiltinToolRef,
@@ -63,11 +64,13 @@ import {
   verifyHiddenMaskTargets,
   verifyPrivilegedSandboxRuntime,
 } from '@/sandbox'
+import { resolveExposableEnvNames } from '@/sandbox/env-exposure'
 
 import { createLoopGuard, type LoopGuard, type LoopGuardDecision } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
 import { enforceSubagentBashPolicy, type SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
+import { remediateToolErrorMessage } from './tool-error-remediation'
 import { enforceAndPinToolFiles, writeToolOutputNoFollow } from './tool-file-safety'
 import { SUBAGENT_OUTPUT_TOOL_NAME, type SubagentOutputToolDetails } from './tools/subagent-output'
 import { webFetchTool } from './tools/webfetch'
@@ -94,10 +97,26 @@ export const TYPECLAW_INTERNAL_BASH_ENV = '__typeclawBashEnv'
 type BashEnvOverlay = Record<string, string>
 const SECRET_BASH_ENV_NAMES = new Set(['GH_TOKEN', 'GITHUB_TOKEN'])
 
-const SECRET_ENV_NAME_PATTERN =
-  /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|API_KEY|ACCESS_KEY(?:_ID)?|SECRET_KEY|PRIVATE_KEY|AUTH)$/
+// Transport classifier for the TRUSTED hook-injected overlay only (e.g.
+// github-cli-auth's per-repo GH_TOKEN). Token/secret-shaped names use `inherit`
+// so their value never renders into the bwrap argv; plain names (GH_REPO) go
+// via `set`. This is NOT a .env exposure filter — the overlay is populated by
+// trusted runtime hooks, not operator .env.
+const OVERLAY_SECRET_NAME_PATTERN = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|AUTH)$/i
+function isOverlaySecretName(name: string): boolean {
+  return SECRET_BASH_ENV_NAMES.has(name) || OVERLAY_SECRET_NAME_PATTERN.test(name)
+}
 
-const bashEnvStore = new AsyncLocalStorage<BashEnvOverlay | undefined>()
+type BashSpawnEnvContext = {
+  overlay?: BashEnvOverlay
+  // Exact env for the outer bwrap process on a sandboxed call. When present, the
+  // spawn hook uses it verbatim rather than the live inherited env, so a secret
+  // that appears in process.env between policy build and spawn stays out of the
+  // sandbox (closes the inherit TOCTOU).
+  sandboxSpawnEnv?: Record<string, string>
+}
+
+const bashEnvStore = new AsyncLocalStorage<BashSpawnEnvContext | undefined>()
 
 function readBashEnvOverlay(args: Record<string, unknown>): BashEnvOverlay | undefined {
   const raw = args[TYPECLAW_INTERNAL_BASH_ENV]
@@ -110,8 +129,9 @@ function readBashEnvOverlay(args: Record<string, unknown>): BashEnvOverlay | und
 }
 
 function bashSpawnHookWithOverlay(context: BashSpawnContext): BashSpawnContext {
-  const overlay = bashEnvStore.getStore()
-  return { ...context, env: sanitizeBashSpawnEnvironment(context.env, overlay) }
+  const store = bashEnvStore.getStore()
+  if (store?.sandboxSpawnEnv !== undefined) return { ...context, env: { ...store.sandboxSpawnEnv } }
+  return { ...context, env: sanitizeBashSpawnEnvironment(context.env, store?.overlay) }
 }
 
 export function sanitizeBashSpawnEnvironment(
@@ -310,6 +330,7 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         callId: toolCallId,
         args: mutableArgs,
         ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
+        ...(tool.fileOperands !== undefined ? { fileOperands: tool.fileOperands } : {}),
       }
       const blockResult = await opts.hooks.runToolBefore(before)
       if (blockResult !== undefined) {
@@ -584,7 +605,16 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
           signal,
         })
         await preparedSandboxRuntime?.verify()
-        rawResult = await bashEnvStore.run(bashEnvOverlay, () =>
+        const spawnEnvContext: BashSpawnEnvContext | undefined =
+          bashEnvOverlay !== undefined || preparedSandboxRuntime?.spawnEnv !== undefined
+            ? {
+                ...(bashEnvOverlay !== undefined ? { overlay: bashEnvOverlay } : {}),
+                ...(preparedSandboxRuntime?.spawnEnv !== undefined
+                  ? { sandboxSpawnEnv: preparedSandboxRuntime.spawnEnv }
+                  : {}),
+              }
+            : undefined
+        rawResult = await bashEnvStore.run(spawnEnvContext, () =>
           tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx),
         )
       } catch (error) {
@@ -596,6 +626,15 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
         const outcomes = await Promise.allSettled(cleanup)
         const failed = outcomes.find((outcome) => outcome.status === 'rejected')
         if (failed?.status === 'rejected') cleanupError = failed.reason
+      }
+      // Decorate genuine, user-correctable builtin file-tool failures with a
+      // recovery hint so weaker models retry correctly. Only executionError (not
+      // cleanupError) and only non-aborted Error instances; remediation is a
+      // no-op for every message/tool outside the allowlist, so abort, sandbox,
+      // and policy errors pass through untouched. Mutating the message in place
+      // preserves the error's subclass and stack for the rethrow.
+      if (executionError instanceof Error && signal?.aborted !== true) {
+        executionError.message = remediateToolErrorMessage(tool.name, executionError.message)
       }
       const finalError = executionError ?? cleanupError
       if (finalError !== undefined) {
@@ -665,6 +704,7 @@ type BashFilesystemPolicyOptions = {
 type PreparedBashSandbox = {
   verify: () => Promise<void>
   cleanup: () => Promise<void>
+  spawnEnv?: Record<string, string>
 }
 
 export function buildBashFilesystemPolicy(options: BashFilesystemPolicyOptions) {
@@ -726,7 +766,7 @@ async function applyBashSandbox(
     (boundary.cleanupRuntime ?? cleanupPrivilegedSandboxRuntime)(privilegedRuntime)
   try {
     await verifyHiddenMaskTargets(maskTargets)
-    const { commandString } = boundary.buildCommand(command, {
+    const { commandString, spawnEnv } = boundary.buildCommand(command, {
       mounts: [
         { type: 'ro-bind', source: agentDir, dest: agentDir },
         { type: 'bind', source: sessionTmp, dest: '/tmp' },
@@ -740,14 +780,21 @@ async function applyBashSandbox(
       cwd: agentDir,
       proc,
       procSelfExe: resolveProcSelfExe(),
-      ...(sandboxEnvOverlay !== undefined || privilegedRuntime !== undefined
-        ? { env: buildSandboxEnvPolicy(sandboxEnvOverlay, privilegedRuntime?.env) }
-        : {}),
+      ...spreadSandboxEnv(
+        buildSandboxEnvPolicy(sandboxEnvOverlay, privilegedRuntime?.env, resolveExposableBashEnvNames(agentDir)),
+      ),
     })
     mutableArgs.command = commandString
+    // The overlay carries command-scoped secret VALUES (e.g. a per-repo GH_TOKEN)
+    // that live in neither process.env nor argv; resolveSpawnEnv snapshots
+    // inherited names from process.env only, so merge the overlay values in here
+    // to complete the exact bwrap-parent env.
+    const mergedSpawnEnv =
+      spawnEnv !== undefined && sandboxEnvOverlay !== undefined ? { ...spawnEnv, ...sandboxEnvOverlay } : spawnEnv
     return {
       verify: async () => (boundary.verifyRuntime ?? verifyPrivilegedSandboxRuntime)(privilegedRuntime),
       cleanup,
+      spawnEnv: mergedSpawnEnv,
     }
   } catch (error) {
     await cleanup()
@@ -755,21 +802,53 @@ async function applyBashSandbox(
   }
 }
 
-function buildSandboxEnvPolicy(
+export function buildSandboxEnvPolicy(
   overlay: BashEnvOverlay | undefined,
   runtimeEnv: Record<string, string> | undefined,
+  exposableEnvNames: readonly string[] = [],
 ): { inherit?: string[]; set?: Record<string, string> } {
   const set = { ...runtimeEnv }
   const inherit: string[] = []
+  const inheritSeen = new Set<string>()
+  const pushInherit = (key: string): void => {
+    if (Object.hasOwn(set, key) || inheritSeen.has(key)) return
+    inheritSeen.add(key)
+    inherit.push(key)
+  }
   for (const [key, value] of Object.entries(overlay ?? {})) {
     if (Object.hasOwn(set, key)) continue
-    if (SECRET_ENV_NAME_PATTERN.test(key)) inherit.push(key)
+    if (isOverlaySecretName(key)) pushInherit(key)
     else set[key] = value
+  }
+  // Operator-declared .env vars pass through by NAME (inherit), keeping values
+  // out of the rendered bwrap argv. Sandbox-integrity names were already dropped
+  // in resolveExposableEnvNames — these are the survivors.
+  for (const key of exposableEnvNames) pushInherit(key)
+  // Pass the entrypoint-exported Xvfb display (start_xvfb: `export DISPLAY=:99`)
+  // through --clearenv, else sandboxed `agent-browser --headed` dies with
+  // "Missing X server or $DISPLAY". Passing the runtime's OWN value (not a fixed
+  // ":99") keeps `docker.file.xvfb=false` advertising no display. Rendered via
+  // `set` (a display number is neither a credential nor shell-injectable), and no
+  // /tmp/.X11-unix bind is needed: Chrome reaches Xvfb over the netns-scoped
+  // abstract X11 socket while bash keeps network:'inherit'.
+  const display = process.env['DISPLAY']
+  if (display !== undefined && display !== '' && !Object.hasOwn(set, 'DISPLAY') && !inheritSeen.has('DISPLAY')) {
+    set['DISPLAY'] = display
   }
   return {
     ...(inherit.length > 0 ? { inherit } : {}),
     ...(Object.keys(set).length > 0 ? { set } : {}),
   }
+}
+
+function spreadSandboxEnv(policy: ReturnType<typeof buildSandboxEnvPolicy>): {
+  env?: ReturnType<typeof buildSandboxEnvPolicy>
+} {
+  return Object.keys(policy).length > 0 ? { env: policy } : {}
+}
+
+function resolveExposableBashEnvNames(agentDir: string): string[] {
+  return resolveExposableEnvNames(readEnvFile(agentDir))
 }
 
 function buildRoleScopedConfigEnv(

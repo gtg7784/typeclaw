@@ -29,6 +29,13 @@ export type ToolFileOperands = {
   input?: readonly string[]
   output?: readonly string[]
   destructive?: readonly string[]
+  // Operand paths whose string values are control tokens or remote identifiers,
+  // never a local file — the file-operand scanner skips them (like a first-party
+  // prose operand) instead of rejecting a `word.ext`-shaped id or a value that
+  // collides with an agent-root dir name. Scoped per operand path and survives
+  // the runtime `__plugin_*` tool-name prefix that a static in-scanner table
+  // cannot. Declare a real file input under `input` (it gets pinned), not here.
+  nonFile?: readonly string[]
 }
 
 export type Tool<P = unknown> = {
@@ -218,6 +225,12 @@ export type ToolBeforeEvent = {
   callId: string
   args: Record<string, unknown>
   origin?: SessionOrigin
+  // The tool author's operand declarations (never model-controlled — set on the
+  // static Tool definition at registration). Carried so a guard that runs before
+  // the file-operand scanner (private-surface-read) can honor the same
+  // `nonFile` exemptions and not block a declared remote identifier that happens
+  // to collide with a hidden dir name. Present only for plugin tools.
+  fileOperands?: ToolFileOperands
 }
 
 export type ToolBeforeResult = void | undefined | { block: true; reason: string }

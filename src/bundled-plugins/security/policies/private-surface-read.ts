@@ -3,6 +3,8 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { TOOLS_WITHOUT_LOCAL_FILE_OPERANDS } from '@/agent/tools-without-local-file-operands'
+import type { ToolFileOperands } from '@/plugin'
 import {
   CANONICAL_AGENT_SECRET_DIRS,
   CANONICAL_AGENT_SECRET_FILES,
@@ -20,7 +22,14 @@ export const GUARD_PRIVATE_SURFACE_READ = 'privateSurfaceRead'
 // scanned, so a new file-reading tool — bundled or third-party — is covered
 // the day it ships without a whitelist edit. web_search/web_fetch take URLs, not
 // local paths, and the path-plausibility filter keeps their args from matching.
-const UNSCANNED_TOOLS = new Set(['bash'])
+//
+// TOOLS_WITHOUT_LOCAL_FILE_OPERANDS is the SAME set the file-operand scanner
+// skips: first-party tools whose args are only remote ids/control tokens
+// (channel/stream/subagent/role reads). Without this, an id equal to a working
+// dir — channel_read({ workspace: "memory" }) — would resolve to /agent/memory
+// and be wrongly blocked here even after the scanner cleared it. Sharing one set
+// keeps both enforcement points agreeing on which tools read no local path.
+const UNSCANNED_TOOLS = new Set(['bash', ...TOOLS_WITHOUT_LOCAL_FILE_OPERANDS])
 const VIRTUAL_FILESYSTEM_ROOTS = ['/proc', '/sys', '/dev', '/run'] as const
 
 // The bash sandbox hides the role's private surface — the working DIRECTORIES
@@ -51,8 +60,9 @@ export function checkPrivateSurfaceReadGuard(options: {
   args: Record<string, unknown>
   agentDir: string
   hidden: HiddenPaths
+  fileOperands?: ToolFileOperands
 }): SecurityBlock | undefined {
-  const { tool, args, agentDir, hidden } = options
+  const { tool, args, agentDir, hidden, fileOperands } = options
   if (UNSCANNED_TOOLS.has(tool)) return undefined
   const deniedDirs = [
     ...new Set([
@@ -73,7 +83,8 @@ export function checkPrivateSurfaceReadGuard(options: {
   ]
   if (deniedDirs.length === 0 && deniedFiles.length === 0) return undefined
 
-  for (const candidate of collectPathCandidates(args, tool)) {
+  const nonFile = fileOperands?.nonFile === undefined ? undefined : new Set(fileOperands.nonFile)
+  for (const candidate of collectPathCandidates(args, tool, nonFile)) {
     const hit = matchHidden(candidate, agentDir, deniedDirs, deniedFiles)
     if (hit !== undefined) {
       return {
@@ -148,6 +159,15 @@ const FREE_TEXT_KEYS_BY_TOOL: Record<string, ReadonlySet<string>> = {
   channel_fetch_attachment: new Set(['filename']),
 }
 
+// Trim before the `file:` test: an exempt prose key otherwise lets a
+// leading-whitespace `file:  file://…/memory` URI slip past the scan (the value
+// is not path-shaped and `isFileUrl` misses it), reaching a fetcher that trims
+// before parsing. Returns the trimmed URI so callers scan the real target.
+function trimmedFileUri(value: string): string | undefined {
+  const trimmed = value.trim()
+  return trimmed.toLocaleLowerCase().startsWith('file:') ? trimmed : undefined
+}
+
 // Recursively collects strings that could be paths, skipping values under a
 // universally-free-text key or a tool-scoped free-text key. Explicit path-like
 // keys still win, and file:// values are normalized before matching. matchHidden then
@@ -157,29 +177,48 @@ const FREE_TEXT_KEYS_BY_TOOL: Record<string, ReadonlySet<string>> = {
 // propagates so nested values under an exempt key (e.g. a structured pattern)
 // stay exempt; top-level strings and array elements carry no key and are always
 // scanned (so attachments[].path is collected).
-function collectPathCandidates(value: unknown, tool: string): string[] {
+//
+// `nonFile` holds the tool author's declared control-token operand PATHS
+// (`fileOperands.nonFile`, trusted metadata). A string at exactly one of those
+// operand paths is skipped, mirroring the file-operand scanner so the two
+// enforcement points agree — an id like `{ tenant: "memory" }` on a tool that
+// declared `nonFile: ['tenant']` is not blocked here. Scoped by EXACT operand
+// path (not key name), so an undeclared key still fails closed; `input`/
+// `output`/`destructive` are deliberately NOT honored (a declared real-file path
+// that resolves under a hidden dir must still block).
+function collectPathCandidates(value: unknown, tool: string, nonFile?: ReadonlySet<string>): string[] {
   const out: string[] = []
-  walk(value, out, tool, false)
+  walk(value, out, tool, false, nonFile, '')
   return out
 }
 
-function walk(value: unknown, out: string[], tool: string, underExempt: boolean, key?: string): void {
+function walk(
+  value: unknown,
+  out: string[],
+  tool: string,
+  underExempt: boolean,
+  nonFile: ReadonlySet<string> | undefined,
+  operandPath: string,
+  key?: string,
+): void {
   if (typeof value === 'string') {
-    const isFileUrl = value.toLocaleLowerCase().startsWith('file:')
+    if (nonFile?.has(operandPath) === true) return
+    const isFileUrl = trimmedFileUri(value) !== undefined
     if (underExempt && !isPathKey(key) && !isFileUrl) return
     const normalized = normalizeCandidate(value)
     if (normalized !== undefined) out.push(normalized)
     return
   }
   if (Array.isArray(value)) {
-    for (const item of value) walk(item, out, tool, underExempt, key)
+    for (const item of value) walk(item, out, tool, underExempt, nonFile, operandPath, key)
     return
   }
   if (value !== null && typeof value === 'object') {
     const toolFreeText = FREE_TEXT_KEYS_BY_TOOL[tool]
-    for (const [key, item] of Object.entries(value)) {
-      const keyIsExempt = NON_PATH_KEYS.has(key) || (toolFreeText?.has(key) ?? false)
-      walk(item, out, tool, underExempt || keyIsExempt, key)
+    for (const [childKey, item] of Object.entries(value)) {
+      const keyIsExempt = NON_PATH_KEYS.has(childKey) || (toolFreeText?.has(childKey) ?? false)
+      const childPath = operandPath === '' ? childKey : `${operandPath}.${childKey}`
+      walk(item, out, tool, underExempt || keyIsExempt, nonFile, childPath, childKey)
     }
   }
 }
@@ -312,16 +351,17 @@ function isPathKey(key: string | undefined): boolean {
 }
 
 function normalizeCandidate(value: string): string | undefined {
-  if (!value.toLocaleLowerCase().startsWith('file:')) return value
+  const uri = trimmedFileUri(value)
+  if (uri === undefined) return value
   try {
-    const url = new URL(value)
+    const url = new URL(uri)
     const pathname = decodeURIComponent(url.pathname)
     if (url.hostname !== '') return `//${url.hostname}${pathname}`
     if (/^\/[A-Za-z]:\//.test(pathname)) return pathname.slice(1)
     // Keep synthetic POSIX container paths platform-independent. fileURLToPath
     // would reinterpret file:///agent/... through the Windows host grammar.
     if (pathname.startsWith('/agent/') || pathname === '/agent') return pathname
-    return fileURLToPath(value)
+    return fileURLToPath(uri)
   } catch {
     return value
   }

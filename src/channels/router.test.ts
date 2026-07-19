@@ -8,7 +8,13 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession, SessionOriginRef } from '@/agent'
-import type { RestartHandoff } from '@/agent/restart-handoff'
+import {
+  consumeRestartHandoff,
+  peekRestartHandoff,
+  RESTART_HANDOFF_TTL_MS,
+  type RestartHandoff,
+  writeRestartHandoff,
+} from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { readContinuationState } from '@/agent/todo/continuation-state'
 import { resolveTodoScope } from '@/agent/todo/scope'
@@ -45,7 +51,10 @@ import {
   isGraceWorthReusing,
   SESSION_GC_INTERVAL_MS,
   SESSION_FRESHNESS_TTL_MS,
+  buildInterruptedSubagentNotice,
+  buildRestartResumeWakeReminder,
   OBSERVED_MESSAGE_MAX_CHARS,
+  RESTART_RESUME_WAKE_REMINDER,
   SESSION_GRACE_HARD_TTL_MS,
   SESSION_IDLE_MS,
   SESSION_CHILD_STUCK_BACKSTOP_MS,
@@ -366,6 +375,7 @@ function makeRouter(
     onRestart?: (ctx?: RestartCommandContext) => Promise<string>
     saveChannelSessions?: (agentDir: string, sessions: readonly ChannelSessionRecord[]) => Promise<void>
     newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
+    listRunningBackgroundSubagentNames?: (sessionId: string) => string[]
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -385,6 +395,9 @@ function makeRouter(
     ...(options.saveChannelSessions !== undefined ? { saveChannelSessions: options.saveChannelSessions } : {}),
     ...(options.newestRunningChildSubagentStartedAt !== undefined
       ? { newestRunningChildSubagentStartedAt: options.newestRunningChildSubagentStartedAt }
+      : {}),
+    ...(options.listRunningBackgroundSubagentNames !== undefined
+      ? { listRunningBackgroundSubagentNames: options.listRunningBackgroundSubagentNames }
       : {}),
     permissions: options.permissions ?? grantAllPermissions,
     now: () => nowRef.value,
@@ -5026,6 +5039,49 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
+  test('suppresses a fenced JSON-object skip_response leak instead of posting it (solar-open2 shape)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        '```json\n{\n  "method": "skip_response",\n  "params": {\n    "reason": "not addressed to me"\n  }\n}\n```',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed plain_text_tool_call_leak (silent)'))).toBe(true)
+  })
+
+  test('recovers the user text from a JSON-object channel_reply leak', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'say hi' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('{"method":"channel_reply","params":{"text":"hi there"}}')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('hi there')
+    expect(sent[0]!.text).not.toContain('method')
+  })
+
   test('posts only the prose when a real reply is followed by a trailing skip_response leak', async () => {
     const dir = await tempDir()
     const logs: string[] = []
@@ -5214,6 +5270,79 @@ describe('ChannelRouter channel-turn protocol', () => {
       expect(getPlainTextChannelToolCallKind('read({ path: "x" }) loads a file for you')).toBeNull()
       expect(getPlainTextChannelToolCallKind('You can use bash("ls") to list files')).toBeNull()
       expect(getPlainTextChannelToolCallKind('channel_disengagement is the noun')).toBeNull()
+    })
+
+    // The JSON-RPC-object serialization shape observed against `solar-open2`
+    // (Upstage): the whole message is `{"method":"<tool>","params":{...}}`,
+    // not a `tool(...)` call expression, so it slips past the call-expression
+    // parser. It routes through the SAME name->kind disposition.
+    test('suppresses a bare JSON-object skip_response leak SILENTLY', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":{"reason":"not for me"}}')).toBe(
+        'suppress-silent',
+      )
+    })
+
+    test('suppresses a FENCED JSON-object skip_response leak SILENTLY (the reported shape)', () => {
+      const leak =
+        '```json\n{\n  "method": "skip_response",\n  "params": {\n    "reason": "not addressed to me"\n  }\n}\n```'
+      expect(getPlainTextChannelToolCallKind(leak)).toBe('suppress-silent')
+    })
+
+    test('suppresses a plain-fenced JSON-object skip_response leak SILENTLY', () => {
+      const leak = '```\n{"method":"skip_response","params":{"reason":"x"}}\n```'
+      expect(getPlainTextChannelToolCallKind(leak)).toBe('suppress-silent')
+    })
+
+    test('recovers JSON-object channel_reply/channel_send serializations', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"channel_reply","params":{"text":"hi"}}')).toBe('reply')
+      expect(getPlainTextChannelToolCallKind('{"method":"channel_send","params":{"text":"hi"}}')).toBe('send')
+    })
+
+    test('suppresses every OTHER JSON-object tool call with a WARN', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"channel_react","params":{"emoji":"eyes"}}')).toBe(
+        'suppress-warn',
+      )
+      expect(getPlainTextChannelToolCallKind('{"method":"bash","params":{"cmd":"ls -la"}}')).toBe('suppress-warn')
+    })
+
+    test('requires EXACTLY method + params keys (a real JSON reply the user asked for is delivered)', () => {
+      // A canonical JSON-RPC frame carries extra keys (`jsonrpc`, `id`); a
+      // user-requested JSON document has arbitrary keys. Neither is the leak
+      // shape, so both reach the user.
+      expect(
+        getPlainTextChannelToolCallKind('{"jsonrpc":"2.0","method":"skip_response","params":{"reason":"x"},"id":1}'),
+      ).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":{},"extra":true}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response"}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"name":"skip_response","arguments":{}}')).toBeNull()
+    })
+
+    test('requires an object-shaped params and identifier-shaped method', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":null}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":[1,2]}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"","params":{}}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"has space","params":{}}')).toBeNull()
+    })
+
+    test('leaves malformed JSON and JSON embedded in prose untouched', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":{')).toBeNull()
+      expect(
+        getPlainTextChannelToolCallKind('here is one: {"method":"skip_response","params":{"reason":"x"}}'),
+      ).toBeNull()
+      expect(
+        getPlainTextChannelToolCallKind('{"method":"skip_response","params":{"reason":"x"}} is the shape'),
+      ).toBeNull()
+    })
+
+    test('handles a CRLF-newline fenced JSON leak', () => {
+      const leak = '```json\r\n{"method":"skip_response","params":{"reason":"x"}}\r\n```'
+      expect(getPlainTextChannelToolCallKind(leak)).toBe('suppress-silent')
+    })
+
+    test('does NOT unwrap tilde fences, 4+ backtick runs, or foreign language tags', () => {
+      expect(getPlainTextChannelToolCallKind('~~~\n{"method":"skip_response","params":{}}\n~~~')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('````\n{"method":"skip_response","params":{}}\n````')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('```python\n{"method":"skip_response","params":{}}\n```')).toBeNull()
     })
   })
 
@@ -5508,6 +5637,43 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     test('returns null when "text" exists only inside a nested object', () => {
       expect(extractPlainTextChannelToolCallText('channel_reply({ meta: { text: "only nested" } })')).toBeNull()
+    })
+
+    test('recovers params.text from a bare JSON-object reply/send serialization', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"text":"hi there"}}')).toBe(
+        'hi there',
+      )
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_send","params":{"chat":"c1","text":"hi"}}')).toBe(
+        'hi',
+      )
+    })
+
+    test('recovers params.text from a FENCED JSON-object reply serialization', () => {
+      const leak = '```json\n{\n  "method": "channel_reply",\n  "params": {\n    "text": "hello world"\n  }\n}\n```'
+      expect(extractPlainTextChannelToolCallText(leak)).toBe('hello world')
+    })
+
+    test('recovers a non-Latin params.text (multi-language)', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"text":"확인해볼게요"}}')).toBe(
+        '확인해볼게요',
+      )
+    })
+
+    test('returns null for a JSON reply/send whose params carries no usable text', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"reason":"nope"}}')).toBeNull()
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"text":"  "}}')).toBeNull()
+    })
+
+    test('returns null for a JSON skip_response (no salvageable user text)', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"skip_response","params":{"reason":"x"}}')).toBeNull()
+    })
+
+    test('ignores an inherited (non-own) text property on the JSON params', () => {
+      // A `__proto__` payload must not surface `Object.prototype.text` as recovered
+      // channel output — only an OWN `text` property is recoverable.
+      expect(
+        extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"__proto__":{"text":"pollution"}}}'),
+      ).toBeNull()
     })
   })
 
@@ -11295,6 +11461,231 @@ describe('ChannelRouter idle session GC', () => {
   })
 })
 
+describe('ChannelRouter writeInterruptedSubagentHandoff', () => {
+  async function liveRouterWithNames(
+    dir: string,
+    names: (sessionId: string) => string[],
+    nowRef?: { value: number },
+  ): Promise<ReturnType<typeof makeRouter>['router']> {
+    const { router } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/fake/${sessionId}.jsonl`,
+      listRunningBackgroundSubagentNames: names,
+      ...(nowRef !== undefined ? { nowRef } : {}),
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    return router
+  }
+
+  test('writes a channel handoff naming the running background subagents', async () => {
+    // given: a live session whose only background child is a running researcher
+    const dir = await tempDir()
+    const router = await liveRouterWithNames(dir, (sessionId) => (sessionId === 'ses_fake_1' ? ['researcher'] : []))
+
+    // when
+    const wrote = await router.writeInterruptedSubagentHandoff()
+
+    // then
+    expect(wrote).toBe(true)
+    const handoff = await consumeRestartHandoff(dir, { now: 1000, accept: (h) => h.origin.kind === 'channel' })
+    expect(handoff?.interruptedSubagents).toEqual(['researcher'])
+    expect(handoff?.origin).toEqual({ kind: 'channel', key: KEY })
+    expect(handoff?.originatingSessionId).toBe('ses_fake_1')
+    expect(handoff?.originatingSessionFile).toBe('ses_fake_1.jsonl')
+  })
+
+  test('writes no handoff and returns false when no session has running background subagents', async () => {
+    // given: a live session with no background children
+    const dir = await tempDir()
+    const router = await liveRouterWithNames(dir, () => [])
+
+    // when
+    const wrote = await router.writeInterruptedSubagentHandoff()
+
+    // then
+    expect(wrote).toBe(false)
+    expect(await consumeRestartHandoff(dir, { accept: (h) => h.origin.kind === 'channel' })).toBeNull()
+  })
+
+  test('returns false when the registry callback is not wired', async () => {
+    // given: a live session but no listRunningBackgroundSubagentNames option
+    const dir = await tempDir()
+    const { router } = makeRouter(dir, { transcriptPathFor: (sessionId) => `/fake/${sessionId}.jsonl` })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when / then
+    expect(await router.writeInterruptedSubagentHandoff()).toBe(false)
+  })
+
+  test('augments an existing handoff with ITS session names, not another live conversation', async () => {
+    // given: an accepted in-session restart handoff for ses_in_session (with an
+    //   author), plus a DIFFERENT live session ses_fake_1 that has its own
+    //   background child. The augment must use ses_in_session's children only —
+    //   attaching ses_fake_1's would tell the restarting thread about unrelated work.
+    const dir = await tempDir()
+    const nowRef = { value: 50_000 }
+    await writeRestartHandoff(dir, {
+      schemaVersion: 2,
+      restartedAt: new Date(1000).toISOString(),
+      originatingSessionId: 'ses_in_session',
+      originatingSessionFile: 'ses_in_session.jsonl',
+      origin: { kind: 'channel', key: KEY },
+      triggeringAuthorId: 'U_OWNER',
+    })
+    const namesFor = (sessionId: string): string[] => {
+      if (sessionId === 'ses_in_session') return ['planner']
+      if (sessionId === 'ses_fake_1') return ['researcher']
+      return []
+    }
+    const router = await liveRouterWithNames(dir, namesFor, nowRef)
+
+    // when
+    const wrote = await router.writeInterruptedSubagentHandoff()
+
+    // then: origin/session/author preserved; names are ses_in_session's, NOT ses_fake_1's;
+    //   restartedAt refreshed to now() so the boot consumer doesn't discard the added note
+    expect(wrote).toBe(true)
+    const handoff = await peekRestartHandoff(dir)
+    expect(handoff?.originatingSessionId).toBe('ses_in_session')
+    expect(handoff?.triggeringAuthorId).toBe('U_OWNER')
+    expect(handoff?.interruptedSubagents).toEqual(['planner'])
+    expect(Date.parse(handoff!.restartedAt)).toBe(nowRef.value)
+  })
+
+  test('returns false and leaves an existing handoff untouched when its own session has no running children', async () => {
+    // given: a handoff for ses_in_session (no children), plus an unrelated live
+    //   session with children — which must NOT be pulled onto the handoff
+    const dir = await tempDir()
+    await writeRestartHandoff(dir, {
+      schemaVersion: 2,
+      restartedAt: new Date(1000).toISOString(),
+      originatingSessionId: 'ses_in_session',
+      originatingSessionFile: 'ses_in_session.jsonl',
+      origin: { kind: 'channel', key: KEY },
+    })
+    const router = await liveRouterWithNames(dir, (sessionId) => (sessionId === 'ses_fake_1' ? ['researcher'] : []))
+
+    // when
+    const wrote = await router.writeInterruptedSubagentHandoff()
+
+    // then
+    expect(wrote).toBe(false)
+    const handoff = await peekRestartHandoff(dir)
+    expect(handoff?.originatingSessionId).toBe('ses_in_session')
+    expect(handoff?.interruptedSubagents).toBeUndefined()
+  })
+
+  test('ignores a stale (expired) handoff and writes a fresh one from current live sessions', async () => {
+    // given: an unclaimed TUI handoff older than the 60s TTL left on disk, plus a
+    //   live channel session with a running background child. peekRestartHandoff
+    //   applies no TTL, so the stale one would otherwise suppress the current
+    //   restart's note (or preserve its old restartedAt so boot discards it).
+    const dir = await tempDir()
+    const nowRef = { value: RESTART_HANDOFF_TTL_MS + 10_000 }
+    await writeRestartHandoff(dir, {
+      schemaVersion: 2,
+      restartedAt: new Date(0).toISOString(),
+      originatingSessionId: 'ses_stale_tui',
+      originatingSessionFile: 'ses_stale_tui.jsonl',
+      origin: { kind: 'tui' },
+    })
+    const router = await liveRouterWithNames(
+      dir,
+      (sessionId) => (sessionId === 'ses_fake_1' ? ['researcher'] : []),
+      nowRef,
+    )
+
+    // when
+    const wrote = await router.writeInterruptedSubagentHandoff()
+
+    // then: the stale TUI handoff is discarded; a FRESH channel handoff is written
+    //   for the current live session, timestamped now() so boot won't drop it
+    expect(wrote).toBe(true)
+    const handoff = await peekRestartHandoff(dir)
+    expect(handoff?.origin).toEqual({ kind: 'channel', key: KEY })
+    expect(handoff?.originatingSessionId).toBe('ses_fake_1')
+    expect(handoff?.interruptedSubagents).toEqual(['researcher'])
+    expect(Date.parse(handoff!.restartedAt)).toBe(nowRef.value)
+    // and the fresh handoff is within TTL of now(), so the boot consumer keeps it
+    expect(
+      await consumeRestartHandoff(dir, { now: nowRef.value, accept: (h) => h.origin.kind === 'channel' }),
+    ).not.toBeNull()
+  })
+
+  test('a fresh operator-restart handoff retains the live session author (author-scoped role survives boot)', async () => {
+    // given: a live channel session whose turn author is U_OWNER (from the routed
+    //   inbound) with a running background child, and no pre-existing handoff —
+    //   the external `typeclaw restart` path with no in-session /restart, no race
+    const dir = await tempDir()
+    const { router } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/fake/${sessionId}.jsonl`,
+      listRunningBackgroundSubagentNames: (sessionId) => (sessionId === 'ses_fake_1' ? ['researcher'] : []),
+    })
+    await router.route(inbound({ isBotMention: true, authorId: 'U_OWNER', authorName: 'owner', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when
+    const wrote = await router.writeInterruptedSubagentHandoff()
+
+    // then: the handoff carries triggeringAuthorId so boot re-seeds the author and
+    //   the author-scoped role (hence channel.send) survives the reminder-only resume
+    expect(wrote).toBe(true)
+    expect((await peekRestartHandoff(dir))?.triggeringAuthorId).toBe('U_OWNER')
+  })
+})
+
+describe('buildRestartResumeWakeReminder', () => {
+  test('returns the plain wake reminder when no subagents were interrupted', () => {
+    expect(buildRestartResumeWakeReminder()).toBe(RESTART_RESUME_WAKE_REMINDER)
+    expect(buildRestartResumeWakeReminder([])).toBe(RESTART_RESUME_WAKE_REMINDER)
+  })
+
+  test('names the interrupted subagents and directs a language-adaptive notice', () => {
+    const reminder = buildRestartResumeWakeReminder(['researcher', 'scout'])
+
+    expect(reminder).toContain('researcher, scout')
+    expect(reminder).toContain('lost when the container')
+    // the directive tells the model to reply in the audience's language, so it
+    // is not English-locked — assert that instruction survives
+    expect(reminder).toContain('in their own language')
+    // never auto-re-run: the human re-asks
+    expect(reminder).toContain('Do not silently')
+  })
+
+  test('renders a non-ASCII (Korean) subagent name intact', () => {
+    // AGENTS.md multi-language rule: text handling must not corrupt non-Latin scripts
+    const reminder = buildRestartResumeWakeReminder(['연구원'])
+
+    expect(reminder).toContain('연구원')
+  })
+
+  test('embeds the standalone interrupted-subagent notice', () => {
+    // the reminder composes the plain wake with the reusable notice, so the
+    // sawInbound path (which uses the notice alone) stays in sync
+    const reminder = buildRestartResumeWakeReminder(['researcher'])
+
+    expect(reminder).toContain(RESTART_RESUME_WAKE_REMINDER)
+    expect(reminder).toContain(buildInterruptedSubagentNotice(['researcher']))
+  })
+})
+
+describe('buildInterruptedSubagentNotice', () => {
+  test('names the lost subagents and forbids auto-re-run, language-adaptively', () => {
+    const notice = buildInterruptedSubagentNotice(['researcher', 'scout'])
+
+    expect(notice).toContain('researcher, scout')
+    expect(notice).toContain('lost when the container')
+    expect(notice).toContain('in their own language')
+    expect(notice).toContain('Do not silently')
+  })
+
+  test('does not include the generic "session was resumed" wake line', () => {
+    // standalone use rides a real inbound's turn, so the "resumed" framing would be wrong
+    expect(buildInterruptedSubagentNotice(['researcher'])).not.toContain('this session was resumed')
+  })
+})
+
 describe('ChannelRouter channel.respond gate', () => {
   type PermissionTable = Record<string, readonly string[]>
 
@@ -14137,6 +14528,57 @@ describe('resumeRestartHandoff', () => {
     // then: the synthetic wake turn fired
     expect(reservation.sawInbound).toBe(false)
     expect(sessions[0]?.prompts.some((p) => p.includes('container just restarted'))).toBe(true)
+  })
+
+  test('delivers the interrupted-subagent notice even when a real inbound coalesced', async () => {
+    // given: a handoff carrying interrupted names AND a racing inbound. The
+    //   generic wake is skipped, but the lost-work directive must still land or
+    //   the thread is never told its result was lost (the review-flagged gap).
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff({ interruptedSubagents: ['researcher'] }))!
+    const inboundDone = router.route(inbound({ authorId: 'alice', authorName: 'alice', text: 'hi there' }))
+    await waitFor(() => reservation.sawInbound)
+
+    // when
+    await reservation.resume()
+    await inboundDone
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: no generic synthetic wake, but the lost-work directive rode a turn
+    expect(sessions).toHaveLength(1)
+    const prompts = sessions[0]!.prompts
+    expect(prompts.some((p) => p.includes('container just restarted'))).toBe(false)
+    expect(prompts.some((p) => p.includes('researcher') && p.includes('lost when the container'))).toBe(true)
+  })
+
+  test('delivers the notice even when the racing inbound is observe-only (never engages)', async () => {
+    // given: a handoff with interrupted names and a racing inbound that will NOT
+    //   engage (not a mention, not a reply, mentions no one). sawInbound flips
+    //   before that decision, so without an explicit drain the queued notice is
+    //   stranded — the review-flagged observe-only gap.
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff({ interruptedSubagents: ['researcher'] }))!
+    const inboundDone = router.route(
+      inbound({ authorId: 'alice', authorName: 'alice', text: 'just chatting', isBotMention: false }),
+    )
+    await waitFor(() => reservation.sawInbound)
+
+    // when
+    await reservation.resume()
+    await inboundDone
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the notice still reached a prompt via the explicit drain
+    await waitFor(() => sessions.length > 0 && sessions[0]!.prompts.some((p) => p.includes('lost when the container')))
+    expect(sessions[0]!.prompts.some((p) => p.includes('container just restarted'))).toBe(false)
   })
 
   test('resume wake turn re-seeds the handoff author so author-scoped roles survive restart', async () => {

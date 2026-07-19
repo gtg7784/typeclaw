@@ -42,6 +42,7 @@ import {
   __resetSharedLoopGuardForTests,
   buildBashFilesystemPolicy,
   buildBuiltinPiToolOverrides,
+  buildSandboxEnvPolicy,
   defaultBuiltinPiToolDefinitions,
   forgetSharedLoopGuardTool,
   TYPECLAW_INTERNAL_BASH_ENV,
@@ -154,6 +155,55 @@ describe('wrapPluginTool', () => {
 
     expect(calls).toEqual([])
     expect(result).toMatchObject({ isError: true })
+  })
+
+  test('a nonFile-declared identifier colliding with a hidden dir passes the private-surface guard, undeclared still blocks', async () => {
+    // Reproduces the guard-ordering the runtime uses: private-surface-read runs
+    // in tool.before, BEFORE the file-operand scanner, and must honor the tool's
+    // trusted `fileOperands.nonFile` (threaded through the event) or a declared
+    // identifier equal to a hidden dir name is wrongly blocked.
+    const seen: Array<Record<string, unknown>> = []
+    const makeTool = () =>
+      defineTool({
+        description: '',
+        parameters: z.object({ tenant: z.string(), region: z.string() }),
+        fileOperands: { nonFile: ['tenant'] },
+        async execute(args) {
+          seen.push(args)
+          return { content: [{ type: 'text', text: 'ok' }] }
+        },
+      })
+    const hooks = createHookBus()
+    hooks.registerAll('security', '/agent', noopLogger, {
+      'tool.before': (event) =>
+        checkPrivateSurfaceReadGuard({
+          tool: event.tool,
+          args: event.args,
+          agentDir: '/agent',
+          hidden: { dirs: ['/agent/memory'], files: [] },
+          ...(event.fileOperands !== undefined ? { fileOperands: event.fileOperands } : {}),
+        }),
+    })
+    const wrap = () =>
+      wrapPluginTool(makeTool(), {
+        pluginName: 'multi',
+        toolName: 'tenant_status',
+        agentDir: '/agent',
+        sessionId: 's',
+        logger: noopLogger,
+        hooks,
+      })
+
+    // Declared nonFile operand equal to a hidden dir → allowed through the guard.
+    const ok = await wrap().execute('c', { tenant: 'memory', region: 'us' }, undefined, undefined, {} as never)
+    expect(textOfFirstContent(ok)).toBe('ok')
+    expect(seen).toEqual([{ tenant: 'memory', region: 'us' }])
+
+    // Undeclared operand equal to a hidden dir → still blocked (fail-closed).
+    seen.length = 0
+    const blocked = await wrap().execute('c', { tenant: 'ok', region: 'memory' }, undefined, undefined, {} as never)
+    expect(blocked).toMatchObject({ isError: true })
+    expect(seen).toEqual([])
   })
 
   test('passes parsed args to plugin execute and exposes ToolContext', async () => {
@@ -1038,6 +1088,380 @@ describe('wrapSystemTool', () => {
         agentDir: '/agent',
       }),
     ).rejects.toThrow(/virtual|process-backed|not available/i)
+  })
+
+  test('post_github_review args are not scanned as local file operands', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-review-operands-'))
+    await mkdir(path.join(agentDir, 'src'), { recursive: true })
+    await writeFile(path.join(agentDir, 'src', 'router.ts'), 'export const x = 1\n')
+
+    const args: Record<string, unknown> = {
+      event: 'REQUEST_CHANGES',
+      body: 'router.ts introduces a risky path.',
+      comments: [{ path: 'src/router.ts', line: 10, body: 'Anchored at a real repo file.' }],
+    }
+
+    const pinned = await enforceAndPinToolFiles({ tool: 'post_github_review', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+
+    expect(args.body).toBe('router.ts introduces a risky path.')
+    expect((args.comments as Array<{ path: string }>)[0]?.path).toBe('src/router.ts')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test.each(['channel_send', 'channel_reply'] as const)(
+    '%s text-only message with slashes is never treated as a file operand',
+    async (tool) => {
+      const slashyMessages = [
+        '☀️ 사당동 날씨 (7/16 목) 27°C 맑음 | 강수확률 30%',
+        'S&P 500 up 2/3 of a point today',
+        'See https://example.com/report for details',
+        'ratio 16/9 and path-like word src/index.ts in prose',
+      ]
+      for (const text of slashyMessages) {
+        const pinned = await enforceAndPinToolFiles({
+          tool,
+          args: { adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHAN', text },
+          agentDir: '/agent',
+          genericInputs: true,
+        })
+        const result: ToolResult = { content: [{ type: 'text', text }], details: { echoed: text } }
+        expect(pinned.restoreResult(result)).toEqual(result)
+        await pinned.cleanup()
+      }
+    },
+  )
+
+  test('channel_send text-only send with a slash reaches the tool unchanged through the wrapper', async () => {
+    const text = '뉴스 요약 (7/16): S&P +2/3, https://example.com/a'
+    let received: string | undefined
+    const tool = definePiTool({
+      name: 'channel_send',
+      label: 'channel_send',
+      description: '',
+      parameters: Type.Any(),
+      async execute(_id, params) {
+        received = (params as { text: string }).text
+        return { content: [{ type: 'text' as const, text: 'ok' }], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'slash-text', hooks: createHookBus() })
+    const result = await wrapped.execute(
+      'c',
+      { adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHAN', text },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(received).toBe(text)
+    expect(textOfFirstContent(result)).toBe('ok')
+  })
+
+  test('channel_send with slash-bearing text still pins the attachment path', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-channel-text-attach-'))
+    const file = path.join(agentDir, 'report.txt')
+    await writeFile(file, 'report body')
+    try {
+      let seenAttachmentPath: string | undefined
+      const tool = definePiTool({
+        name: 'channel_send',
+        label: 'channel_send',
+        description: '',
+        parameters: Type.Any(),
+        async execute(_id, params) {
+          seenAttachmentPath = (params as { attachments: Array<{ path: string }> }).attachments[0]?.path
+          const body = await readFile(seenAttachmentPath as string, 'utf8')
+          return { content: [{ type: 'text' as const, text: body }], details: undefined }
+        },
+      })
+      const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 'text-attach', hooks: createHookBus() })
+      const result = await wrapped.execute(
+        'c',
+        {
+          adapter: 'slack-bot',
+          workspace: 'T0ACME',
+          chat: 'C0CHAN',
+          text: 'here (7/16)',
+          attachments: [{ path: file }],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(seenAttachmentPath).not.toBe(file)
+      expect(textOfFirstContent(result)).toBe('report body')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('first-party prose operands with path-shaped values are never pinned or rejected', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-prose-'))
+    await mkdir(path.join(agentDir, 'src'), { recursive: true })
+    await writeFile(path.join(agentDir, 'src', 'router.ts'), 'x')
+
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['spawn_subagent', { subagent_type: 'explore', prompt: 'Look at src/router.ts and summarize.' }],
+      ['spawn_subagent', { subagent_type: 'explore', description: 'check src/app.ts' }],
+      ['skip_response', { reason: 'nothing to do, see notes.md' }],
+      ['web_search', { query: 'how to configure vite.config.ts' }],
+      ['web_fetch', { url: 'https://example.com/a', query: '.data[0].path', selector: 'div.a/b', pattern: 'a/b\\d' }],
+      ['todo_write', { todos: [{ content: 'edit src/router.ts', status: 'pending', priority: 'high' }] }],
+      ['channel_edit', { workspace: 'W', chat: 'C', message_id: '1', text: 'fixed in src/router.ts (7/16)' }],
+    ]
+    for (const [tool, args] of cases) {
+      const before = JSON.stringify(args)
+      const pinned = await enforceAndPinToolFiles({ tool, args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(JSON.stringify(args)).toBe(before)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('prose exemption is tool-scoped: an undeclared reader with a common key still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-toolscoped-'))
+    await writeFile(path.join(agentDir, 'data.json'), 'SENSITIVE')
+    // `content`, `body`, `prompt`, `name` are opaque prose ONLY for their declared
+    // first-party tools. An undeclared plugin/MCP reader must not inherit that.
+    for (const key of ['content', 'body', 'prompt', 'name']) {
+      await expect(
+        enforceAndPinToolFiles({
+          tool: 'plugin_reader',
+          args: { [key]: `${agentDir}/data.json` },
+          agentDir,
+          genericInputs: true,
+        }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a whitespace- or case-varied file: URI is pinned, never passed through', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-ws-uri-'))
+    await writeFile(path.join(agentDir, 'data.json'), 'SENSITIVE')
+    const href = pathToFileURL(path.join(agentDir, 'data.json')).href
+    const variants = [`  ${href}`, `\t${href}`, `\n${href}`, href.replace(/^file:/, 'FILE:')]
+    for (const value of variants) {
+      const args: Record<string, unknown> = { url: value }
+      const pinned = await enforceAndPinToolFiles({ tool: 'web_fetch', args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(String(args.url)).toContain('typeclaw-tool-input')
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a url field still pins an explicit file: URI (symlink-swap defense preserved)', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-url-pin-'))
+    await writeFile(path.join(agentDir, 'src.txt'), 'real')
+    const args: Record<string, unknown> = { url: pathToFileURL(path.join(agentDir, 'src.txt')).href }
+    const pinned = await enforceAndPinToolFiles({ tool: 'custom_reader', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+    expect(String(args.url)).toContain('typeclaw-tool-input')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('undeclared path-shaped operand on an unknown key still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-failclosed-'))
+    await writeFile(path.join(agentDir, 'data.bin'), 'd')
+    await expect(
+      enforceAndPinToolFiles({ tool: 'some_plugin_tool', args: { value: 'data.bin' }, agentDir, genericInputs: true }),
+    ).rejects.toThrow(/ambiguous local file operand/)
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('reload scope collides with a real agent-dir directory but is not scanned as a file operand', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-reload-scope-'))
+    await mkdir(path.join(agentDir, 'cron'), { recursive: true })
+    await mkdir(path.join(agentDir, 'channels'), { recursive: true })
+
+    for (const scope of ['cron', 'channels', 'config', 'plugins', 'skills']) {
+      const args: Record<string, unknown> = { scope }
+      const pinned = await enforceAndPinToolFiles({ tool: 'reload', args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(args.scope).toBe(scope)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('stream_snapshot target_kind "cron" is not scanned as a file operand despite a cron/ directory', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-stream-kind-'))
+    await mkdir(path.join(agentDir, 'cron'), { recursive: true })
+
+    const args: Record<string, unknown> = { target_kind: 'cron' }
+    const pinned = await enforceAndPinToolFiles({ tool: 'stream_snapshot', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+    expect(args.target_kind).toBe('cron')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('grant_role permission "channel.respond" is not scanned as a file operand (word.ext shape)', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-grant-perm-'))
+
+    const args: Record<string, unknown> = { role: 'guest', permission: 'channel.respond' }
+    const pinned = await enforceAndPinToolFiles({ tool: 'grant_role', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+    expect(args.permission).toBe('channel.respond')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('non-file exemption is tool-scoped: an unknown tool reusing scope/target_kind still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-nonfile-scoped-'))
+    await mkdir(path.join(agentDir, 'cron'), { recursive: true })
+
+    for (const [tool, key] of [
+      ['plugin_reloader', 'scope'],
+      ['plugin_streamer', 'target_kind'],
+    ] as const) {
+      await expect(
+        enforceAndPinToolFiles({ tool, args: { [key]: 'cron' }, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('the fs-existence probe still rejects an extensionless file or directory under a non-file key', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-probe-preserved-'))
+    await writeFile(path.join(agentDir, 'credentials'), 'SECRET')
+    await mkdir(path.join(agentDir, 'memory'), { recursive: true })
+
+    for (const value of ['credentials', 'memory']) {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'some_plugin_tool', args: { source: value }, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('identifier-only system tools accept remote ids that trip the word.ext, cursor, and fs-probe rules', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-whole-tool-'))
+    for (const dir of ['memory', 'channels', 'sessions', 'workspace']) {
+      await mkdir(path.join(agentDir, dir), { recursive: true })
+    }
+
+    // Slack message/thread ids are always epoch.micros (word.ext); cursors carry
+    // "/"; workspace/target_id/subagent_type/task_id can equal an agent-root dir.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [
+        'channel_read',
+        { mode: 'message', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', message_id: '1699999999.000100' },
+      ],
+      [
+        'channel_read',
+        { mode: 'history', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1699999999.000100' },
+      ],
+      [
+        'channel_read',
+        { mode: 'history', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', cursor: 'dGVhbTpU/bmV4dA==' },
+      ],
+      ['channel_read', { mode: 'list', adapter: 'slack-bot', workspace: 'memory' }],
+      ['channel_history', { cursor: '1699999999.000100', scope: 'channel' }],
+      [
+        'channel_edit',
+        { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', message_id: '1699999999.000100', text: 'x' },
+      ],
+      ['channel_react', { emoji: 'party.parrot' }],
+      ['stream_snapshot', { target_kind: 'session', target_id: 'memory' }],
+      ['grant_role', { role: 'guest', permission: 'channel.respond' }],
+      ['spawn_subagent', { subagent_type: 'memory', prompt: 'hi' }],
+      ['subagent_output', { task_id: 'sessions' }],
+      ['subagent_cancel', { task_id: 'sessions' }],
+      ['look_at_channel_attachment', { attachment_id: 1, prompt: 'describe /agent/workspace' }],
+    ]
+    for (const [tool, args] of cases) {
+      const before = JSON.stringify(args)
+      const pinned = await enforceAndPinToolFiles({ tool, args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(JSON.stringify(args)).toBe(before)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('whole-tool exemption is scoped: an unknown tool with the same id-shaped args still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-wholetool-scoped-'))
+    await mkdir(path.join(agentDir, 'memory'), { recursive: true })
+    for (const args of [{ message_id: '1699999999.000100' }, { workspace: 'memory' }, { cursor: 'a/b/c' }]) {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'plugin_channel_like', args, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('reviewer_checkout repoSlug passes via its own nonFile declaration, not a global key exemption', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-reposlug-'))
+    const declared = { nonFile: ['repoSlug', 'headSha'] } as const
+
+    // The tool declares repoSlug/headSha as non-file; the "/" in owner/repo is
+    // then not misread as a path separator. (The tool's own REPO_SLUG regex
+    // rejects traversal downstream — the scanner no longer second-guesses it.)
+    const ok: Record<string, unknown> = { repoSlug: 'typeclaw/typeclaw', headSha: 'a'.repeat(40) }
+    const pinned = await enforceAndPinToolFiles({
+      tool: 'reviewer_checkout',
+      args: ok,
+      agentDir,
+      genericInputs: true,
+      fileOperands: declared,
+    })
+    await pinned.cleanup()
+    expect(ok.repoSlug).toBe('typeclaw/typeclaw')
+
+    // An UNDECLARED tool passing a valid-looking repoSlug must STILL fail closed:
+    // repoSlug is no longer exempt globally by key name.
+    for (const value of ['typeclaw/typeclaw', 'public/notes', '../etc/passwd']) {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'unknown_plugin', args: { repoSlug: value }, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a plugin fileOperands.nonFile declaration exempts its operands but stays tool+path scoped', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-nonfile-decl-'))
+    await mkdir(path.join(agentDir, 'sessions'), { recursive: true })
+
+    // Runtime prefixes subagent custom-tool names, so a static in-scanner table
+    // keyed by "memory_append" would miss it; the declaration travels with the tool.
+    const operands = { nonFile: ['topic', 'body'] } as const
+    const ok: Record<string, unknown> = { topic: 'sessions', body: 'see a/b/c for detail' }
+    const pinned = await enforceAndPinToolFiles({
+      tool: '__plugin_memory_memory-logger_3',
+      args: ok,
+      agentDir,
+      genericInputs: true,
+      fileOperands: operands,
+    })
+    await pinned.cleanup()
+    expect(ok).toEqual({ topic: 'sessions', body: 'see a/b/c for detail' })
+
+    // An UNDECLARED operand on the same tool must still fail closed.
+    await expect(
+      enforceAndPinToolFiles({
+        tool: '__plugin_memory_memory-logger_3',
+        args: { topic: 'ok', attachment: 'sessions' },
+        agentDir,
+        genericInputs: true,
+        fileOperands: operands,
+      }),
+    ).rejects.toThrow(/ambiguous local file operand/)
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a declared real-file input is pinned to an immutable snapshot, not rejected', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-input-pin-'))
+    await mkdir(path.join(agentDir, 'sessions'), { recursive: true })
+    await writeFile(path.join(agentDir, 'sessions', 'ses_x.jsonl'), '{"id":"e1"}\n')
+
+    const args: Record<string, unknown> = { path: 'sessions/ses_x.jsonl', entryId: 'e1' }
+    const pinned = await enforceAndPinToolFiles({
+      tool: '__plugin_memory_find_0',
+      args,
+      agentDir,
+      genericInputs: true,
+      fileOperands: { input: ['path'] },
+    })
+    expect(String(args.path)).toContain('typeclaw-tool-input')
+    await pinned.cleanup()
+    await rm(agentDir, { recursive: true, force: true })
   })
 
   test('parallel read, look_at, and channel upload calls consume pinned bytes across symlink swaps', async () => {
@@ -2050,6 +2474,53 @@ describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
         .map((p) => p.text)
         .join('\n')
       expect(errorText).toContain('no such file or directory')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('missing-path builtin file tool: rethrown error and tool.after both carry the recovery hint', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-missing-path-'))
+    const missing = path.join(agentDir, 'does-not-exist.txt')
+    const afterResults: unknown[] = []
+    let executed = false
+    const tool = {
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String() }),
+      async execute() {
+        executed = true
+        return { content: [{ type: 'text' as const, text: 'unreachable' }], details: {} }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.after': (event) => {
+        afterResults.push(event.result)
+      },
+    })
+
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 's', hooks })
+
+    try {
+      // enforceAndPinToolFiles throws the authorization error BEFORE execute
+      const thrown = await wrapped
+        .execute('c', { path: missing } as never, undefined, undefined, {} as never)
+        .then(() => undefined)
+        .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+
+      expect(executed).toBe(false)
+      expect(thrown?.message).toContain('tool input did not exist while being authorized')
+      expect(thrown?.message).toContain('the path does not exist')
+
+      expect(afterResults).toHaveLength(1)
+      const afterText = ((afterResults[0] as ToolResult).content as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      expect(afterText).toContain('tool input did not exist while being authorized')
+      expect(afterText).toContain('the path does not exist')
     } finally {
       await rm(agentDir, { recursive: true, force: true })
     }
@@ -3106,6 +3577,60 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       /permission service/i,
     )
     expect(seenInHook).toBeUndefined()
+  })
+})
+
+describe('buildSandboxEnvPolicy exposable .env names', () => {
+  test('adds exposable names to inherit so values stay out of argv', () => {
+    const policy = buildSandboxEnvPolicy(undefined, undefined, ['AGENT_MESSENGER_CONFIG_DIR', 'OPENSOMA_CONFIG_DIR'])
+    expect(policy.inherit).toEqual(['AGENT_MESSENGER_CONFIG_DIR', 'OPENSOMA_CONFIG_DIR'])
+    expect(policy.set).toBeUndefined()
+  })
+
+  test('does not inherit a name already provided by the privileged runtime set', () => {
+    const policy = buildSandboxEnvPolicy(undefined, { AGENT_MESSENGER_CONFIG_DIR: '/runtime' }, [
+      'AGENT_MESSENGER_CONFIG_DIR',
+    ])
+    expect(policy.inherit ?? []).not.toContain('AGENT_MESSENGER_CONFIG_DIR')
+    expect(policy.set?.AGENT_MESSENGER_CONFIG_DIR).toBe('/runtime')
+  })
+
+  test('deduplicates a name that is both a secret-pattern overlay and an exposable name', () => {
+    const policy = buildSandboxEnvPolicy({ FOO_TOKEN: 'x' }, undefined, ['FOO_TOKEN'])
+    expect(policy.inherit).toEqual(['FOO_TOKEN'])
+  })
+})
+
+describe('buildSandboxEnvPolicy DISPLAY passthrough (agent-browser --headed)', () => {
+  const originalDisplay = process.env['DISPLAY']
+
+  afterEach(() => {
+    if (originalDisplay === undefined) delete process.env['DISPLAY']
+    else process.env['DISPLAY'] = originalDisplay
+  })
+
+  test('passes the runtime DISPLAY into set so sandboxed Chrome finds the X server', () => {
+    process.env['DISPLAY'] = ':99'
+    const policy = buildSandboxEnvPolicy(undefined, undefined, [])
+    expect(policy.set?.DISPLAY).toBe(':99')
+  })
+
+  test('omits DISPLAY when the runtime has none (docker.file.xvfb=false)', () => {
+    delete process.env['DISPLAY']
+    const policy = buildSandboxEnvPolicy(undefined, undefined, [])
+    expect(policy.set?.DISPLAY).toBeUndefined()
+  })
+
+  test('omits DISPLAY when set to an empty string', () => {
+    process.env['DISPLAY'] = ''
+    const policy = buildSandboxEnvPolicy(undefined, undefined, [])
+    expect(policy.set?.DISPLAY).toBeUndefined()
+  })
+
+  test('does not overwrite a DISPLAY already provided by the privileged runtime set', () => {
+    process.env['DISPLAY'] = ':99'
+    const policy = buildSandboxEnvPolicy(undefined, { DISPLAY: ':1' }, [])
+    expect(policy.set?.DISPLAY).toBe(':1')
   })
 })
 

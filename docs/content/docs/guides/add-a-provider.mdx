@@ -22,9 +22,10 @@ typeclaw provider add zai-coding --key ...     # Z.AI GLM Coding Plan
 typeclaw provider add xai --key xai-...        # xAI (Grok) — also supports --oauth
 typeclaw provider add minimax --key ...        # pay-as-you-go API key or Token Plan key (sk-cp-…)
 typeclaw provider add deepseek --key sk-...     # DeepSeek pay-as-you-go
+typeclaw provider add upstage --key up_...      # Upstage (Solar) pay-as-you-go
 ```
 
-The supported providers are `openai`, `openai-codex`, `anthropic`, `fireworks`, `zai`, `zai-coding`, `xai`, `minimax`, and `deepseek`. The key (or browser login) is stored in `secrets.json`, git-ignored like the rest of your credentials.
+The supported providers are `openai`, `openai-codex`, `anthropic`, `fireworks`, `zai`, `zai-coding`, `xai`, `minimax`, `deepseek`, and `upstage`. The key (or browser login) is stored in `secrets.json`, git-ignored like the rest of your credentials.
 
 <Callout type="info" title="MiniMax: pay-as-you-go or Token Plan">
   MiniMax sells one `minimax` provider under two billing surfaces — pay-as-you-go API keys and Token Plan Subscription

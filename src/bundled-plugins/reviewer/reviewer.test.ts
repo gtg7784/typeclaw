@@ -421,6 +421,36 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('one `praise` finding per prior concern the author fixed')
   })
 
+  test('code-review skill guards against reviewer-imposed scope drift while keeping correctness in scope (drift guard)', () => {
+    // The reviewer's own findings can pull a PR away from the author's stated
+    // intent — "I would build it differently" turned into a requirement. Without
+    // this the review gold-plates the author's approach across pushes. But the
+    // guard must NOT excuse real defects: intent bounds what you may demand, it
+    // does not redefine correctness, and an evidence-backed deviation from the
+    // codebase's OWN established architecture/conventions stays a legitimate
+    // finding. The cumulative re-review check must also account for the fresh
+    // reviewer having no memory of its prior rounds.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('reviewer-imposed scope drift')
+    expect(lower).toContain("author's intent baseline")
+    // intent bounds what you may DEMAND, but does not redefine correctness —
+    // a bug inside the chosen scope is always fair game.
+    expect(lower).toContain('it does not redefine **correctness**'.toLowerCase())
+    // the architecture-fit exception is not suppressed: a codebase-own
+    // deviation that "will compound" remains findable before other defects.
+    expect(lower).toContain('will compound')
+    // cumulative re-review re-anchoring, aware the reviewer has no memory of
+    // its own prior feedback and must reconstruct or fall back to the baseline.
+    expect(lower).toContain('cumulative direction')
+    expect(lower).toContain('no memory of your own prior rounds')
+    expect(lower).toContain('current cumulative diff')
+    // The prescribed history reads MUST paginate: GitHub returns reviews/comments
+    // 30 per page, so an unpaginated read truncates the very history the
+    // cumulative check needs on a long-lived PR (same reason the channel-github
+    // re-review query paginates). Without this the check silently misattributes.
+    expect(lower).toContain('`--paginate` is mandatory here')
+  })
+
   test('general skill body teaches universal review craft (load-bearing audience-fit phrasing)', () => {
     const lower = GENERAL_REVIEW_SKILL.content.toLowerCase()
     expect(lower).toContain('load-bearing')

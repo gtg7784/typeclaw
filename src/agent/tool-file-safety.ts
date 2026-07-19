@@ -11,6 +11,10 @@ import type { ToolFileOperands, ToolResult } from '@/plugin'
 import { CANONICAL_AGENT_SECRET_FILES } from '@/sandbox/canonical-secrets'
 import type { HiddenPaths } from '@/sandbox/hidden-paths'
 
+import { TOOLS_WITHOUT_LOCAL_FILE_OPERANDS } from './tools-without-local-file-operands'
+
+export { TOOLS_WITHOUT_LOCAL_FILE_OPERANDS }
+
 type Rewrite = { original: string; pinned: string }
 type FileTarget = { get(): string; original: string; set(value: string): void; uri: boolean }
 type VerifiedInput = {
@@ -217,6 +221,7 @@ function fileTargets(
   agentDir: string,
 ): FileTarget[] {
   if (isOutputTool(tool)) return []
+  if (TOOLS_WITHOUT_LOCAL_FILE_OPERANDS.has(tool)) return []
   if (tool === 'read' && typeof args.path === 'string') return [propertyTarget(args, 'path')]
   if (isTreeInputTool(tool)) {
     if (typeof args.path !== 'string') args.path = '.'
@@ -228,17 +233,59 @@ function fileTargets(
     targets.push(propertyTarget(value, 'path'))
     if (targets.length > maxCount) throw inputCountTooLarge(targets.length, maxCount)
   }
-  if (tool === 'look_at' && Array.isArray(args.images)) {
-    for (const image of args.images) addPath(image)
+  if (tool === 'look_at') {
+    if (Array.isArray(args.images)) for (const image of args.images) addPath(image)
     return targets
   }
-  if ((tool === 'channel_send' || tool === 'channel_reply') && Array.isArray(args.attachments)) {
-    for (const attachment of args.attachments) addPath(attachment)
+  // The only file operand for these tools is `attachments[].path`; `text` is free-form
+  // prose (dates like "7/16", URLs, fractions) that must never reach the generic scan,
+  // which rejects any value carrying a `/` or `\`. Return early even without attachments
+  // so a text-only message is never misread as a path. Attachment pinning is unchanged.
+  if (tool === 'channel_send' || tool === 'channel_reply') {
+    if (Array.isArray(args.attachments)) for (const attachment of args.attachments) addPath(attachment)
     return targets
   }
   if (tool === 'channel_fetch_attachment') return targets
-  if (genericInputs) collectGenericFileTargets(args, targets, maxCount, fileOperands, agentDir)
+  // post_github_review has no local file operands: `comments[].path` are remote
+  // GitHub diff anchors and the `body` fields are markdown. Scanning them as
+  // generic operands either pins a real-repo anchor into a /tmp file:// path that
+  // leaks into the posted review, or throws "ambiguous local file operand".
+  if (tool === 'post_github_review') return targets
+  if (genericInputs) collectGenericFileTargets(tool, args, targets, maxCount, fileOperands, agentDir)
   return targets
+}
+
+// Exact tool + operand-path pairs for first-party PROSE operands (message
+// bodies, prompts, queries, regex/CSS/jq strings) that are never a local file.
+// This table is for tools that ALSO have a real file operand and so cannot be
+// whole-tool exempt via TOOLS_WITHOUT_LOCAL_FILE_OPERANDS: web_fetch pins its
+// `url` (a file: URI there still snapshots) while `query`/`selector`/`pattern`
+// are prose. Pure control-token tools (reload, grant_role, stream_snapshot,
+// channel_edit, …) live in that set instead, so they are absent here.
+//
+// Scoped by full operand path, NOT key name — this is the fail-closed invariant:
+// an undeclared plugin/MCP reader that reuses `content`/`prompt`/`query` must
+// still hit the scan and cannot inherit an exemption from a common key name.
+// Plugin/MCP tools declare their own via `fileOperands.nonFile` (survives the
+// runtime `__plugin_*` name prefix, which a static table here would not).
+const NON_FILE_OPERANDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  skip_response: new Set(['reason']),
+  web_search: new Set(['query']),
+  web_fetch: new Set(['query', 'selector', 'pattern']),
+  todo_write: new Set(['todos.content']),
+}
+
+function isKnownNonFileOperand(tool: string, operandPath: string): boolean {
+  return NON_FILE_OPERANDS[tool]?.has(operandPath) === true
+}
+
+// Detection trims first: a leading-whitespace `  file://…` is still a file
+// reference to any consumer that trims before parsing, so it must be pinned or
+// denied, never passed through untouched. The original untrimmed string is
+// preserved on the target for result restoration; the trimmed URI is what gets
+// normalized and snapshotted.
+function isFileUri(value: string): boolean {
+  return value.trim().toLocaleLowerCase().startsWith('file:')
 }
 
 function propertyTarget(object: Record<string, unknown>, key: string): FileTarget {
@@ -249,7 +296,7 @@ function propertyTarget(object: Record<string, unknown>, key: string): FileTarge
     set: (value) => {
       object[key] = value
     },
-    uri: raw.toLocaleLowerCase().startsWith('file:'),
+    uri: isFileUri(raw),
   }
 }
 
@@ -261,7 +308,7 @@ function arrayTarget(array: unknown[], index: number): FileTarget {
     set: (value) => {
       array[index] = value
     },
-    uri: raw.toLocaleLowerCase().startsWith('file:'),
+    uri: isFileUri(raw),
   }
 }
 
@@ -312,6 +359,7 @@ function collectDeclaredOutputTargets(
 }
 
 function collectGenericFileTargets(
+  tool: string,
   value: unknown,
   out: FileTarget[],
   maxCount: number,
@@ -324,10 +372,18 @@ function collectGenericFileTargets(
     const nonInput =
       operands?.output?.includes(parentPath) === true || operands?.destructive?.includes(parentPath) === true
     const key = parentPath.split('.').at(-1) ?? parentPath
+    // Precedence: declared input pins; declared output/destructive is not an
+    // input; a known non-file operand is opaque (skipped, even a file: URI);
+    // otherwise an explicit file: URI pins and an undeclared path-shaped value
+    // fails closed. Both the static first-party table and a plugin's declared
+    // `fileOperands.nonFile` are tool+operand-path scoped, so an unknown tool
+    // never inherits an exemption from a common key name.
+    const knownNonFile =
+      !declaredInput && (operands?.nonFile?.includes(parentPath) === true || isKnownNonFileOperand(tool, parentPath))
     for (const [index, item] of value.entries()) {
       if (typeof item === 'string') {
-        const fileUrl = item.toLocaleLowerCase().startsWith('file:')
-        if (!nonInput && (fileUrl || declaredInput)) {
+        if (knownNonFile) continue
+        if (!nonInput && (isFileUri(item) || declaredInput)) {
           out.push(arrayTarget(value, index))
           if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
         } else if (
@@ -341,7 +397,7 @@ function collectGenericFileTargets(
         }
         continue
       }
-      collectGenericFileTargets(item, out, maxCount, operands, agentDir, parentPath)
+      collectGenericFileTargets(tool, item, out, maxCount, operands, agentDir, parentPath)
     }
     return
   }
@@ -349,11 +405,22 @@ function collectGenericFileTargets(
   for (const [childKey, item] of Object.entries(value)) {
     const operandPath = parentPath === '' ? childKey : `${parentPath}.${childKey}`
     if (typeof item === 'string') {
-      const fileUrl = item.toLocaleLowerCase().startsWith('file:')
       const declaredInput = operands?.input?.includes(operandPath) === true
       const nonInput =
         operands?.output?.includes(operandPath) === true || operands?.destructive?.includes(operandPath) === true
-      if (!nonInput && (fileUrl || declaredInput)) {
+      // Declared input wins; a known non-file operand (web_search.query,
+      // web_fetch.selector, a plugin's declared `fileOperands.nonFile`, …) is
+      // opaque and skipped even when its value is a file: URI; everything else
+      // falls to the file:/heuristic scan below. Scoped by exact tool+operand-
+      // path so an undeclared plugin reader using `content`/`prompt` still
+      // fails closed.
+      if (
+        !declaredInput &&
+        (operands?.nonFile?.includes(operandPath) === true || isKnownNonFileOperand(tool, operandPath))
+      ) {
+        continue
+      }
+      if (!nonInput && (isFileUri(item) || declaredInput)) {
         out.push(propertyTarget(value, childKey))
         if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
         continue
@@ -368,7 +435,7 @@ function collectGenericFileTargets(
         )
       }
     }
-    collectGenericFileTargets(item, out, maxCount, operands, agentDir, operandPath)
+    collectGenericFileTargets(tool, item, out, maxCount, operands, agentDir, operandPath)
   }
 }
 
@@ -789,10 +856,14 @@ function isSemanticGenericString(key: string, value: string): boolean {
 }
 
 function isExplicitNonFileUrl(value: string): boolean {
-  if (/^[A-Za-z]:[\\/]/.test(value)) return false
-  if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) || value.toLocaleLowerCase().startsWith('file:')) return false
+  // Trim to match the file:/URL detection elsewhere: a leading-whitespace
+  // "  https://…" is still a non-file URL, and a "  file://…" must NOT be
+  // treated as one (it pins). Windows-drive and file: exclusions run on trimmed.
+  const trimmed = value.trim()
+  if (/^[A-Za-z]:[\\/]/.test(trimmed)) return false
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed) || trimmed.toLocaleLowerCase().startsWith('file:')) return false
   try {
-    return new URL(value).protocol !== 'file:'
+    return new URL(trimmed).protocol !== 'file:'
   } catch {
     return false
   }
@@ -836,9 +907,10 @@ function isDeniedSnapshotPath(
 }
 
 function normalizeFileReference(value: string): string {
-  if (!value.toLocaleLowerCase().startsWith('file:')) return value
+  const trimmed = value.trim()
+  if (!trimmed.toLocaleLowerCase().startsWith('file:')) return value
   try {
-    return fileURLToPath(value)
+    return fileURLToPath(trimmed)
   } catch {
     throw new Error(`invalid file URI: ${value}`)
   }

@@ -77,6 +77,13 @@ export function createAppendTool(options: CreateAppendToolOptions = {}) {
       references: z.array(z.string()).optional(),
       who: z.string().min(1).optional(),
     }),
+    // None of these is a local path — topic/body are prose, the rest are session/
+    // entry/reference ids. The runtime chooses the stream filename; the tool never
+    // opens a caller path. Declared so a body carrying "/" or a slug/id that
+    // collides with an agent-root dir name is not misread as a file operand.
+    fileOperands: {
+      nonFile: ['topic', 'body', 'source', 'entry', 'latestEntryId', 'references', 'who'],
+    },
     async execute({ topic, body, source, entry, latestEntryId, references, who }, ctx) {
       const streamPath = dailyStreamPath(ctx.agentDir)
       const where = provenanceFromOrigin(originProvider?.())

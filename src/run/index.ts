@@ -68,6 +68,7 @@ import {
   exportClaudeCredentialsFileForAgent,
   exportCodexAuthFileForAgent,
   hydrateChannelEnvFromSecrets,
+  refreshProviderOAuthForAgent,
 } from '@/secrets'
 import { createServer, type Server } from '@/server'
 import {
@@ -121,6 +122,10 @@ export type StartAgentOptions = {
   // over the real env + <cwd>/secrets.json. Injectable so tests can supply a
   // fake secrets provider without touching process.env.
   caps?: RuntimeCapabilities
+  // Boot-time proactive provider-OAuth refresh. Injectable so a test can supply
+  // a refresh that holds the real secrets lock on a gate, proving the boot
+  // barrier settles this before any session-producing consumer starts.
+  refreshProviderOAuth?: (options: { agentDir: string; log: (message: string) => void }) => Promise<unknown>
 }
 
 export type StartAgentResult = {
@@ -181,6 +186,7 @@ async function startAgentRuntime(
     createChannelManager: createChannelManagerFor = createChannelManager,
     createTunnelManager: createTunnelManagerFor = createTunnelManager,
     caps = createRuntimeCapabilities(process.env, join(cwd, 'secrets.json')),
+    refreshProviderOAuth = refreshProviderOAuthForAgent,
   }: StartAgentOptions,
   registerBootCleanup: (cleanup: () => void | Promise<void>) => void,
 ): Promise<StartAgentResult> {
@@ -375,6 +381,29 @@ async function startAgentRuntime(
     log: (message) => console.warn(message),
   })
 
+  // Proactively refresh any stored provider-OAuth token now. The SDK's own
+  // refresh is lazy (fires on the first LLM call), so a container that restarts
+  // with an already-expired access token otherwise discovers the staleness —
+  // and any refresh failure — mid-turn, surfacing a generic provider-error
+  // notice into a live thread. Doing it here moves that to a boot-time operator
+  // log. Channel-adapter OAuth already has host-side renewal crons; this is the
+  // provider-OAuth equivalent.
+  //
+  // MUST be awaited, and MUST run before the first session-producing consumer
+  // (subagentConsumer.start / cronConsumer.start / channelManager.start / the
+  // websocket server). The SDK refresh holds SecretsBackend's async file lock
+  // across its network request; getAuthFor()'s synchronous lock read gives up
+  // after ~200ms and process.exit(1)s on ELOCKED. Fire-and-forget here would let
+  // a slow refresh still own the lock when a consumer creates a session — worse
+  // than the lazy path. Awaiting behind this barrier guarantees no synchronous
+  // auth reader exists while the refresh owns the lock. Never throws (the
+  // wrapper swallows and logs), so a probe failure can't block boot; a refresh
+  // that hangs on a wedged network hangs the first turn today anyway.
+  await refreshProviderOAuth({
+    agentDir: cwd,
+    log: (message) => console.warn(message),
+  })
+
   const claimController = createClaimController({
     cwd,
     permissions: pluginsLoaded.permissions,
@@ -430,6 +459,11 @@ async function startAgentRuntime(
             child.status === 'running' && (newest === null || child.startedAt > newest) ? child.startedAt : newest,
           null,
         ),
+    listRunningBackgroundSubagentNames: (sessionId) =>
+      liveSubagentRegistry
+        .list({ parentSessionId: sessionId })
+        .filter((child) => child.status === 'running' && child.background === true)
+        .map((child) => child.subagentName),
     onReload: async () => {
       const { results } = await reloadRegistry.reloadAll()
       return formatChannelReloadSummary(results)
@@ -1040,6 +1074,10 @@ async function startAgentRuntime(
     forceExit.unref()
     void (async () => {
       if (containerName !== undefined) {
+        // Persist the interrupted-subagent handoff BEFORE markRestartAbortForAllLive
+        // aborts the sessions and stop() tears them down — both read the same live
+        // set this write depends on.
+        await channelManager.router.writeInterruptedSubagentHandoff().catch(() => undefined)
         await markRestartAbortPendingForOrigin(cwd, { kind: 'tui', sessionId: 'tui' }).catch(() => undefined)
         await channelManager.router.markRestartAbortForAllLive().catch(() => undefined)
       }
